@@ -15,3 +15,5 @@
 /cmd/backtest/results/*
 /cmd/backtest/CODE_RECOMMENDATIONS.md
 /cmd/backtest/IMPROVEMENTS.md
+backtest
+backtest
