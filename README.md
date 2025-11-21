@@ -85,54 +85,63 @@ The bot includes a **realistic backtest engine** that simulates day-by-day tradi
 
 ### Running the Backtest
 
-To run the realistic backtest engine:
+To run a backtest:
 
 ```bash
 go run cmd/backtest/main.go [flags]
 ```
+
+**Note:** By default, the backtest runs in simple mode (`-realistic=false`). However, the simple backtest engine is not yet implemented. To run a backtest, you must use `-realistic=true` to use the realistic day-by-day backtest engine.
 
 ### Flags
 
 -   `-ticker`: Single ticker symbol to backtest (overrides `BACKTEST_TICKERS` env var). For multiple tickers, use `BACKTEST_TICKERS` env var.
 -   `-days`: Number of days to look back (default: 30).
 -   `-account`: Initial account size (default: 25000).
--   `-risk`: Risk percentage per trade (default: 0.02 for 2%, but note: actual risk is capped at 1% of account size).
+-   `-risk`: Risk percentage per trade (default: 0.005 for 0.5%). Note: actual risk is capped at 1% of account size.
 -   `-eval`: Enable eval mode - limits single trade profit to 1.8% of account size (default: true).
--   `-realistic`: Use realistic backtest engine - day-by-day processing with account balance tracking (default: false). Set to `true` to use the realistic ticker-by-ticker backtest engine.
+-   `-realistic`: Use realistic backtest engine - day-by-day processing with account balance tracking (default: false). Set to `true` to enable.
+-   `-runs`: Number of backtests to run simultaneously (default: 1). Useful for running multiple backtests concurrently.
 
 ### Examples
 
-**Run backtest for AAPL over the last 30 days:**
-
-```bash
-go run cmd/backtest/main.go -ticker AAPL
-```
-
-**Run backtest for multiple tickers over the last 60 days with $50,000 account:**
-
-```bash
-# Set in .env file:
-# BACKTEST_TICKERS=AAPL,TSLA,AMD
-
-go run cmd/backtest/main.go -days 60 -account 50000
-```
-
-**Run backtest with eval mode disabled:**
-
-```bash
-go run cmd/backtest/main.go -ticker AAPL -eval=false
-```
-
-**Run simple backtest (ticker-by-ticker, no account balance tracking):**
+**Run realistic backtest for AAPL over the last 30 days:**
 
 ```bash
 go run cmd/backtest/main.go -ticker AAPL -realistic=true
 ```
 
-**Run backtest using tickers defined in `.env`:**
+**Run realistic backtest for multiple tickers over the last 60 days with $50,000 account:**
 
 ```bash
-go run cmd/backtest/main.go
+# Set in .env file:
+# BACKTEST_TICKERS=AAPL,TSLA,AMD
+
+go run cmd/backtest/main.go -days 60 -account 50000 -realistic=true
+```
+
+**Run realistic backtest with eval mode disabled:**
+
+```bash
+go run cmd/backtest/main.go -ticker AAPL -realistic=true -eval=false
+```
+
+**Run simple backtest (ticker-by-ticker, no account balance tracking - not yet implemented):**
+
+```bash
+go run cmd/backtest/main.go -ticker AAPL -realistic=false
+```
+
+**Run multiple backtests simultaneously:**
+
+```bash
+go run cmd/backtest/main.go -ticker AAPL -realistic=true -runs 5
+```
+
+**Run realistic backtest using tickers defined in `.env`:**
+
+```bash
+go run cmd/backtest/main.go -realistic=true
 ```
 
 ### How the Realistic Backtest Works
@@ -168,15 +177,18 @@ The realistic backtest engine processes trading **day-by-day** (** All bar data 
 
 The backtester outputs:
 - **Console output:** Summary statistics including total trades, win rate, total P&L, and final account balance
-- **CSV file:** Detailed trade log saved to `cmd/backtest/results/backtest_YYYYMMDD_HHMMSS_Nd_Npct.csv` with columns:
+- **CSV file:** Detailed trade log saved to `cmd/backtest/results/backtest_YYYYMMDD_HHMMSS_runN_Nd_Npct.csv` with columns:
   - `Ticker`: Stock symbol
   - `EntryTime`: Entry timestamp
   - `ExitTime`: Exit timestamp
+  - `Direction`: Trade direction (SHORT/LONG)
   - `EntryPrice`: Entry price
   - `ExitPrice`: Exit price
   - `Shares`: Number of shares traded
   - `Reason`: Exit reason (Stop Loss, Target, EOD, Time Decay, etc.)
-  - `PnL`: Profit/Loss for the trade
+  - `GrossPnL`: Profit/Loss before commissions
+  - `Commission`: Trading commission
+  - `NetPnL`: Profit/Loss after commissions and profit threshold rules
 
 ### Differences from Simple Backtest
 
