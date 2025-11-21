@@ -117,31 +117,31 @@ go run cmd/backtest/main.go -ticker AAPL -realistic=true
 # Set in .env file:
 # BACKTEST_TICKERS=AAPL,TSLA,AMD
 
-go run cmd/backtest/main.go -days 60 -account 50000 -realistic=true
+go run cmd/backtest/*.go -days 60 -account 50000 -realistic=true
 ```
 
 **Run realistic backtest with eval mode disabled:**
 
 ```bash
-go run cmd/backtest/main.go -ticker AAPL -realistic=true -eval=false
+go run cmd/backtest/*.go -ticker AAPL -realistic=true -eval=false
 ```
 
 **Run simple backtest (ticker-by-ticker, no account balance tracking - not yet implemented):**
 
 ```bash
-go run cmd/backtest/main.go -ticker AAPL -realistic=false
+go run cmd/backtest/*.go -ticker AAPL -realistic=false
 ```
 
 **Run multiple backtests simultaneously:**
 
 ```bash
-go run cmd/backtest/main.go -ticker AAPL -realistic=true -runs 5
+go run cmd/backtest/*.go -ticker AAPL -realistic=true -runs 5
 ```
 
 **Run realistic backtest using tickers defined in `.env`:**
 
 ```bash
-go run cmd/backtest/main.go -realistic=true
+go run cmd/backtest/*.go -realistic=true
 ```
 
 ### How the Realistic Backtest Works
