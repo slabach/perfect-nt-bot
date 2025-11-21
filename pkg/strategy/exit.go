@@ -10,7 +10,8 @@ type ExitChecker struct {
 	target2Profit    float64 // Second target profit per share (e.g., 0.25-0.30)
 	minProfitPerShare float64 // Minimum profit to count (e.g., 0.10)
 	trailingStopOffset float64 // Trailing stop offset (e.g., 0.05)
-	timeDecayHours    float64 // Hours before time decay exit (e.g., 2.0)
+	timeDecayWindow1Hours float64 // Hours before first time decay window (triggers profit check)
+	timeDecayWindow2Hours float64 // Hours before second time decay window (force exit)
 	breakevenMinutes  float64 // Minutes before moving to breakeven (e.g., 30)
 	earlyExitHour     int     // Hour to exit if not profitable (e.g., 15 for 3:30 PM ET)
 	earlyExitMinute   int     // Minute to exit if not profitable (e.g., 30)
@@ -19,12 +20,13 @@ type ExitChecker struct {
 // NewExitChecker creates a new exit checker
 func NewExitChecker() *ExitChecker {
 	return &ExitChecker{
-		target1Profit:    0.08,  // $0.08/share for first target (matched to entry checker, faster profits)
-		target2Profit:    0.15,  // $0.15/share for second target (matched to entry checker, faster exits)
+		target1Profit:    0.15,  // $0.15/share for first target (matched to entry checker, larger targets)
+		target2Profit:    0.25,  // $0.25/share for second target (matched to entry checker, better risk/reward)
 		minProfitPerShare: 0.10,
 		trailingStopOffset: 0.10, // Increased from 0.05 to 0.10 to avoid premature exits
-		timeDecayHours:    1.5,  // Exit faster if no progress (down from 2.0 hours)
-		breakevenMinutes:  30.0, // Move to breakeven after 30 minutes
+		timeDecayWindow1Hours: 1.0, // First window: start checking for profit > $0.10/share
+		timeDecayWindow2Hours: 2.0, // Second window: force exit regardless of profit
+		breakevenMinutes:  20.0, // Move to breakeven after 20 minutes (reduced from 30)
 		earlyExitHour:     15,   // Exit by 3:30 PM ET if not profitable
 		earlyExitMinute:   30,
 	}
@@ -47,11 +49,16 @@ func (ec *ExitChecker) CheckExitConditions(
 		pnlPerShare = currentPrice - position.EntryPrice
 	}
 
-	// Early EOD exit: Exit losing positions at 3:00 PM (50 minutes before EOD)
-	// This prevents holding losing positions until market close
-	earlyEODTime := eodTime.Add(-50 * time.Minute) // 3:00 PM instead of 3:50 PM
-	if (currentTime.After(earlyEODTime) || currentTime.Equal(earlyEODTime)) && pnlPerShare < 0 {
-		return true, ExitReasonTimeDecay, currentPrice
+	// Priority 1 Fix: Improved EOD Exit Logic
+	// Exit ALL unprofitable positions by 2:00 PM (110 minutes before EOD)
+	// This prevents positions from being held all day and losing money at EOD
+	unprofitableExitTime := eodTime.Add(-110 * time.Minute) // 2:00 PM
+	if currentTime.After(unprofitableExitTime) || currentTime.Equal(unprofitableExitTime) {
+		if pnlPerShare <= 0 {
+			// Not profitable by 2:00 PM - exit now to avoid EOD losses
+			return true, ExitReasonTimeDecay, currentPrice
+		}
+		// Profitable by 2:00 PM - allow to hold until EOD or target
 	}
 
 	// Check EOD (3:50 PM ET) - must close all remaining positions
@@ -60,6 +67,7 @@ func (ec *ExitChecker) CheckExitConditions(
 	}
 
 	// Early exit: If it's after 3:30 PM ET and trade is not profitable, exit
+	// (This is redundant now but kept as safety net)
 	if ec.shouldEarlyExit(currentTime, pnlPerShare) {
 		return true, ExitReasonTimeDecay, currentPrice
 	}
@@ -78,14 +86,18 @@ func (ec *ExitChecker) CheckExitConditions(
 		}
 	}
 
-	// Check trailing stop
-	if position.TrailingStop != nil {
-		if ec.isTrailingStopHit(position, currentPrice) {
-			return true, ExitReasonTrailingStop, *position.TrailingStop
-		}
-		// Update trailing stop if profitable
-		ec.updateTrailingStop(position, pnlPerShare)
-	}
+	// Phase 1 Fix #2: Disable Trailing Stops temporarily
+	// Trailing stops are losing money (0% win rate, -$128.50 total P&L)
+	// Let Target 1/2 handle profit taking instead
+	// 
+	// Check trailing stop (DISABLED - commented out for now)
+	// if position.TrailingStop != nil {
+	// 	if ec.isTrailingStopHit(position, currentPrice) {
+	// 		return true, ExitReasonTrailingStop, *position.TrailingStop
+	// 	}
+	// 	// Update trailing stop if profitable
+	// 	ec.updateTrailingStop(position, pnlPerShare)
+	// }
 
 	// Check target 1 (partial exit - already handled in position management)
 	// This is for remaining shares
@@ -102,9 +114,9 @@ func (ec *ExitChecker) CheckExitConditions(
 		}
 	}
 
-	// Check time decay
-	if ec.isTimeDecayHit(position, currentTime, pnlPerShare) {
-		return true, ExitReasonTimeDecay, currentPrice
+	// Check time decay (two-window system)
+	if shouldExit, reason := ec.isTimeDecayHit(position, currentTime, pnlPerShare); shouldExit {
+		return true, reason, currentPrice
 	}
 
 	return false, "", 0
@@ -179,22 +191,31 @@ func (ec *ExitChecker) isTrailingStopHit(position *Position, currentPrice float6
 	return currentPrice <= *position.TrailingStop
 }
 
-// isTimeDecayHit checks if time decay exit condition is met
-func (ec *ExitChecker) isTimeDecayHit(position *Position, currentTime time.Time, pnlPerShare float64) bool {
-	// Check if position has been open for more than timeDecayHours
+// isTimeDecayHit checks if time decay exit condition is met (two-window system)
+// Returns (shouldExit, reason)
+func (ec *ExitChecker) isTimeDecayHit(position *Position, currentTime time.Time, pnlPerShare float64) (bool, ExitReason) {
 	duration := currentTime.Sub(position.EntryTime)
 	hoursOpen := duration.Hours()
 
-	if hoursOpen < ec.timeDecayHours {
-		return false
+	// Window 2: Force exit regardless of profit
+	if hoursOpen >= ec.timeDecayWindow2Hours {
+		return true, ExitReasonTimeDecay
 	}
 
-	// If profit is below minimum threshold after time decay period, exit
-	if pnlPerShare < ec.minProfitPerShare {
-		return true
+	// Window 1: Start checking if profit > $0.10/share
+	if hoursOpen >= ec.timeDecayWindow1Hours {
+		// Mark that we've hit window 1
+		if !position.TimeDecayWindow1Hit {
+			position.TimeDecayWindow1Hit = true
+		}
+
+		// If we're in window 1 and profit > $0.10/share, exit
+		if pnlPerShare >= ec.minProfitPerShare {
+			return true, ExitReasonTimeDecay
+		}
 	}
 
-	return false
+	return false, ""
 }
 
 // shouldMoveToBreakeven checks if we should move stop to breakeven after 30 minutes

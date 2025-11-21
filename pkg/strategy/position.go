@@ -26,6 +26,7 @@ func (pm *PositionManager) OpenPosition(signal *EntrySignal, shares int) *Positi
 		Target2:         signal.Target2,
 		FilledTarget1:   false,
 		FilledTarget2:   false,
+		TimeDecayWindow1Hit: false, // Initialize time decay window tracking
 		StrategyState: &IndicatorState{
 			VWAP:     signal.VWAPExtension, // Store extension, not VWAP itself
 			ATR:      0,                     // Will need to be updated

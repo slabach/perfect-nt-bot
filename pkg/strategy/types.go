@@ -57,7 +57,7 @@ type Position struct {
 	Shares           int
 	Direction        string // "SHORT" or "LONG"
 	EntryTime        time.Time
-	StopLoss         float64
+	StopLoss        float64
 	Target1          float64
 	Target2          float64
 	RemainingShares  int    // After partial fills
@@ -66,6 +66,7 @@ type Position struct {
 	TrailingStop     *float64 // Active trailing stop price
 	StrategyState    *IndicatorState
 	Pattern          DeathCandlePattern
+	TimeDecayWindow1Hit bool // Track if we've hit the first time decay window
 }
 
 // ExitReason represents why a position was closed

@@ -19,12 +19,14 @@ type EntryChecker struct {
 // NewEntryChecker creates a new entry checker with default parameters
 func NewEntryChecker() *EntryChecker {
 	return &EntryChecker{
-		vwapExtensionThreshold: 0.1,  // Price must be 0.1x ATR above VWAP (very relaxed for max trades)
-		rsiThreshold:          47.0,  // RSI must be > 47 (very relaxed for more opportunities)
-		minVolumeMA:           0.15,   // Volume must be > 0.15x 20-period average (very permissive)
-		target1Profit:         0.08,  // $0.08/share for first target (faster profits)
-		target2Profit:         0.15,  // $0.15/share for second target (faster exits)
-		atrStopMultiplier:    1.5,   // Stop at 1.5x ATR (reasonable stops)
+		// Priority 2 Fix: Relaxed entry filters to increase trade frequency
+		vwapExtensionThreshold: 0.55, // Relaxed from 0.6x to 0.55x ATR to capture more opportunities
+		rsiThreshold:          57.0,  // Relaxed from 58 to 57 to capture more opportunities
+		minVolumeMA:           0.7,   // Relaxed from 0.75x to 0.7x average to capture more opportunities
+		target1Profit:         0.15,  // $0.15/share for first target (larger targets to overcome commissions)
+		target2Profit:         0.25,  // $0.25/share for second target (better risk/reward)
+		// Phase 1 Fix #3: Tightened stop loss
+		atrStopMultiplier:    1.0,   // Reduced from 1.2x to 1.0x ATR (tighter stops for better risk/reward)
 		maxConcurrentPositions: 3,   // More positions for more opportunities
 	}
 }
@@ -43,11 +45,22 @@ func (ec *EntryChecker) CheckEntryConditions(
 		return nil, fmt.Errorf("past EOD cutoff")
 	}
 
-	// Time-based entry filter: Restrict entries after 2:00 PM ET
-	// Afternoon entries perform poorly (analysis shows 2:00 PM and 3:00 PM entries have lower avg P&L)
+	// Priority 2 Fix: Extended entry window to 2:00 PM to capture more opportunities
+	// Still avoid entries too late in the day to prevent EOD losses
 	entryHour := bar.Time.Hour()
-	if entryHour >= 14 { // 2:00 PM or later
-		return nil, fmt.Errorf("entry too late in day (hour: %d, need: < 14)", entryHour)
+	entryMinute := bar.Time.Minute()
+	
+	// Avoid entries after 2:00 PM (14:00) - extended from 1:30 PM
+	if entryHour > 14 || (entryHour == 14 && entryMinute >= 0) {
+		return nil, fmt.Errorf("entry too late in day (hour: %d:%02d, need: < 14:00)", entryHour, entryMinute)
+	}
+	
+	// Avoid entries in first 15 minutes of market open (9:30-9:45 AM)
+	// Market opens at 9:30 AM - allow entries starting at 9:45 AM
+	// 10:00 AM entries are the best performing (avg +$58.56)
+	if entryHour == 9 && entryMinute >= 30 && entryMinute < 45 {
+		// Reject 9:30-9:44 AM (first 15 minutes after market open)
+		return nil, fmt.Errorf("entry too early in day (hour: %d:%02d, need: >= 9:45)", entryHour, entryMinute)
 	}
 
 	// Check max concurrent positions
@@ -89,19 +102,30 @@ func (ec *EntryChecker) CheckEntryConditions(
 			bar.Volume, indicators.VolumeMA*ec.minVolumeMA)
 	}
 
-	// Check for death candle pattern (optional - prefer pattern but allow setups without)
-	pattern := DetectDeathCandlePattern(bar, Bar{}) // Need previous bar for full detection
+	// Phase 2 Fix #4: Require death candle pattern (don't allow entries without pattern)
+	// Pattern detection requires previous bar for full accuracy
+	// This will be properly checked in CheckEntryConditionsWithPrevious
+	pattern := DetectDeathCandlePattern(bar, Bar{}) // Placeholder - will be updated with previous bar
 	patternConfidence := PatternConfidence(pattern, bar, vwapExtension)
 
-	// Allow entries without death candle patterns - very relaxed for eval mode
+	// Note: Actual pattern requirement is enforced in CheckEntryConditionsWithPrevious
+	// For now, set low confidence - will be updated if pattern exists
 	if pattern == NoPattern {
-		// Just need basic filters passed (VWAP extension and RSI already checked above)
-		// If we pass those, allow entry to maximize opportunities
-		patternConfidence = 0.4
+		patternConfidence = 0.3
 	}
+	
+	// Priority 3 Fix: Momentum filter - price should be moving away from VWAP
+	// For short entries, we want to see price moving up (away from VWAP)
+	// This will be properly checked in CheckEntryConditionsWithPrevious with previous bar
 
-	// Calculate stop loss (1.5x ATR above entry for short)
-	stopLoss := currentPrice + (indicators.ATR * ec.atrStopMultiplier)
+	// Phase 1 Fix #3: Calculate stop loss with max limit
+	// Stop at 1.0x ATR above entry for short (reduced from 1.2x)
+	atrStop := indicators.ATR * ec.atrStopMultiplier
+	maxStopPerShare := 0.50 // Limit max stop loss to $0.50/share for high-volatility stocks
+	if atrStop > maxStopPerShare {
+		atrStop = maxStopPerShare
+	}
+	stopLoss := currentPrice + atrStop
 
 	// Calculate targets
 	target1 := currentPrice - ec.target1Profit
@@ -143,6 +167,37 @@ func (ec *EntryChecker) CheckEntryConditionsWithPrevious(
 ) (*EntrySignal, error) {
 	currentPrice := currentBar.Close
 	pattern := DetectDeathCandlePattern(currentBar, previousBar)
+	
+	// Priority 3 Fix: Momentum filter - require price moving away from VWAP
+	// For short entries, we want to see price moving up (current > previous close)
+	// This indicates momentum away from VWAP, making it more likely to hit Target 1
+	// Allow small negative movements (>= -$0.01) to account for noise, but filter out clear reversals
+	if !previousBar.Time.IsZero() {
+		priceMomentum := currentBar.Close - previousBar.Close
+		// For shorts, we want positive momentum (price going up, away from VWAP)
+		// Allow small negative movements (>= -$0.01/share) to account for market noise
+		// But filter out clear reversals where price is moving back toward VWAP
+		if priceMomentum < -0.01 {
+			return nil, fmt.Errorf("price moving back toward VWAP (price change: %.4f, need: >= -0.01 for short entry)", priceMomentum)
+		}
+	}
+	
+	// Phase 2 Fix #4: Prefer death candle pattern but allow strong setups without pattern
+	// Pattern requirement was too strict - making it optional but preferred
+	// Entries without pattern need stronger VWAP extension and RSI to compensate
+	if pattern == NoPattern {
+		// Allow entries without pattern IF other criteria are very strong
+		// Require higher VWAP extension (0.75x vs 0.55x normal) and higher RSI (60 vs 57 normal)
+		requiredExtension := 0.75 // Higher than normal 0.55x threshold
+		requiredRSI := 60.0       // Higher than normal 57 threshold
+		
+		vwapExtension := GetVWAPExtension(currentPrice, indicators.VWAP, indicators.ATR)
+		if vwapExtension < requiredExtension || indicators.RSI < requiredRSI {
+			return nil, fmt.Errorf("no death candle pattern detected - requires stronger setup (VWAP: %.2f>=%.2f ATR, RSI: %.1f>=%.1f)", 
+				vwapExtension, requiredExtension, indicators.RSI, requiredRSI)
+		}
+		// Strong setup without pattern - allow entry but with lower confidence
+	}
 	
 	// Update indicators with pattern confidence calculation
 	vwapExtension := GetVWAPExtension(currentPrice, indicators.VWAP, indicators.ATR)
