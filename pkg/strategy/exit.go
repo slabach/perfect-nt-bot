@@ -22,7 +22,7 @@ func NewExitChecker() *ExitChecker {
 		target1Profit:    0.08,  // $0.08/share for first target (matched to entry checker, faster profits)
 		target2Profit:    0.15,  // $0.15/share for second target (matched to entry checker, faster exits)
 		minProfitPerShare: 0.10,
-		trailingStopOffset: 0.05,
+		trailingStopOffset: 0.10, // Increased from 0.05 to 0.10 to avoid premature exits
 		timeDecayHours:    1.5,  // Exit faster if no progress (down from 2.0 hours)
 		breakevenMinutes:  30.0, // Move to breakeven after 30 minutes
 		earlyExitHour:     15,   // Exit by 3:30 PM ET if not profitable
@@ -47,7 +47,14 @@ func (ec *ExitChecker) CheckExitConditions(
 		pnlPerShare = currentPrice - position.EntryPrice
 	}
 
-	// Check EOD (3:50 PM ET) - must close all positions
+	// Early EOD exit: Exit losing positions at 3:00 PM (50 minutes before EOD)
+	// This prevents holding losing positions until market close
+	earlyEODTime := eodTime.Add(-50 * time.Minute) // 3:00 PM instead of 3:50 PM
+	if (currentTime.After(earlyEODTime) || currentTime.Equal(earlyEODTime)) && pnlPerShare < 0 {
+		return true, ExitReasonTimeDecay, currentPrice
+	}
+
+	// Check EOD (3:50 PM ET) - must close all remaining positions
 	if currentTime.After(eodTime) || currentTime.Equal(eodTime) {
 		return true, ExitReasonEOD, currentPrice
 	}
@@ -131,6 +138,11 @@ func (ec *ExitChecker) isTarget2Hit(position *Position, currentPrice float64) bo
 
 // updateTrailingStop updates trailing stop if profitable
 func (ec *ExitChecker) updateTrailingStop(position *Position, pnlPerShare float64) {
+	// Only activate trailing stop after target 1 is hit (to avoid premature exits)
+	if !position.FilledTarget1 {
+		return
+	}
+	
 	// Only trail if profitable above minimum threshold
 	if pnlPerShare < ec.minProfitPerShare {
 		return

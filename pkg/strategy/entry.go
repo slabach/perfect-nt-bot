@@ -43,6 +43,13 @@ func (ec *EntryChecker) CheckEntryConditions(
 		return nil, fmt.Errorf("past EOD cutoff")
 	}
 
+	// Time-based entry filter: Restrict entries after 2:00 PM ET
+	// Afternoon entries perform poorly (analysis shows 2:00 PM and 3:00 PM entries have lower avg P&L)
+	entryHour := bar.Time.Hour()
+	if entryHour >= 14 { // 2:00 PM or later
+		return nil, fmt.Errorf("entry too late in day (hour: %d, need: < 14)", entryHour)
+	}
+
 	// Check max concurrent positions
 	if openPositions >= ec.maxConcurrentPositions {
 		return nil, fmt.Errorf("max concurrent positions reached")

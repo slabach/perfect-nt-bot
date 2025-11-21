@@ -78,6 +78,7 @@ const (
 	ExitReasonTrailingStop ExitReason = "Trailing Stop"
 	ExitReasonTimeDecay    ExitReason = "Time Decay"
 	ExitReasonEOD          ExitReason = "End of Day"
+	ExitReasonMaxDailyLoss ExitReason = "Max Daily Loss"
 	ExitReasonManual       ExitReason = "Manual"
 )
 
