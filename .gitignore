@@ -1,0 +1,17 @@
+.env
+.DS_Store
+.idea
+.vscode
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.development
+.env.test
+.env.production
+.env.local
+.env.development.local
+.env.test.local
+/cmd/backtest/results/*
+/cmd/backtest/CODE_RECOMMENDATIONS.md
+/cmd/backtest/IMPROVEMENTS.md
