@@ -122,12 +122,27 @@ func (se *StrategyEngine) GetTickerState(ticker string) (*IndicatorState, bool) 
 	return state, exists
 }
 
-// CheckEntry checks if entry conditions are met for a ticker
+// CheckEntry checks if entry conditions are met for a ticker (checks both short and long)
 func (se *StrategyEngine) CheckEntry(ticker string, bar Bar, eodTime time.Time, openPositions int) (*EntrySignal, error) {
+	signals := se.CheckBothDirections(ticker, bar, eodTime, openPositions)
+	
+	// Return the first signal found (short has priority, but scoring will handle ranking)
+	// If both exist, scoring will rank them properly in the backtest
+	if len(signals) > 0 {
+		return signals[0], nil
+	}
+	
+	return nil, fmt.Errorf("no entry signals found")
+}
+
+// CheckBothDirections checks both short and long entry opportunities for a ticker
+func (se *StrategyEngine) CheckBothDirections(ticker string, bar Bar, eodTime time.Time, openPositions int) []*EntrySignal {
+	signals := make([]*EntrySignal, 0)
+	
 	// Get ticker state
 	state, exists := se.tickerStates[ticker]
 	if !exists {
-		return nil, fmt.Errorf("no state for ticker %s", ticker)
+		return signals
 	}
 
 	// Get previous bar for pattern detection
@@ -136,38 +151,68 @@ func (se *StrategyEngine) CheckEntry(ticker string, bar Bar, eodTime time.Time, 
 		previousBar = bars[len(bars)-1]
 	}
 
-	currentPrice := bar.Close
-
-	// Check entry conditions
-	signal, err := se.entryChecker.CheckEntryConditions(
-		ticker,
-		bar,
-		state,
-		currentPrice,
-		openPositions,
-		eodTime,
-	)
-
-	if err != nil {
-		return nil, err
+	// Check short entry conditions
+	var shortSignal *EntrySignal
+	var err error
+	
+	if !previousBar.Time.IsZero() {
+		// Use previous bar for better pattern detection
+		shortSignal, err = se.entryChecker.CheckEntryConditionsWithPrevious(
+			ticker,
+			bar,
+			previousBar,
+			state,
+			openPositions,
+			eodTime,
+		)
+	} else {
+		// No previous bar, use basic check
+		currentPrice := bar.Close
+		shortSignal, err = se.entryChecker.CheckEntryConditions(
+			ticker,
+			bar,
+			state,
+			currentPrice,
+			openPositions,
+			eodTime,
+		)
+	}
+	
+	if err == nil && shortSignal != nil {
+		signals = append(signals, shortSignal)
 	}
 
-	// Re-check with previous bar for better pattern detection
-	if previousBar.Time.IsZero() {
-		return signal, nil
+	// Check long entry conditions
+	var longSignal *EntrySignal
+	
+	if !previousBar.Time.IsZero() {
+		// Use previous bar for better pattern detection
+		longSignal, err = se.entryChecker.CheckLongEntryConditionsWithPrevious(
+			ticker,
+			bar,
+			previousBar,
+			state,
+			openPositions,
+			eodTime,
+		)
+	} else {
+		// No previous bar, use basic check
+		currentPrice := bar.Close
+		longSignal, err = se.entryChecker.CheckLongEntryConditions(
+			ticker,
+			bar,
+			state,
+			currentPrice,
+			openPositions,
+			eodTime,
+		)
+	}
+	
+	if err == nil && longSignal != nil {
+		signals = append(signals, longSignal)
 	}
 
-	// Use previous bar for pattern detection
-	signal, err = se.entryChecker.CheckEntryConditionsWithPrevious(
-		ticker,
-		bar,
-		previousBar,
-		state,
-		openPositions,
-		eodTime,
-	)
-
-	return signal, err
+	return signals
 }
 
 // CheckExits checks all open positions for exit conditions

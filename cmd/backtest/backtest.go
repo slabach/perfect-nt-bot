@@ -278,39 +278,14 @@ func (rbe *RealisticBacktestEngine) checkEntries(currentTime time.Time, eodTime 
 			continue // Indicators not updated for this bar yet
 		}
 
-		// Get previous bar for pattern detection
-		var previousBar strategy.Bar
-		if prevBar, exists := rbe.previousBars[ticker]; exists {
-			previousBar = rbe.convertBar(*prevBar)
-		}
-
-		// Check entry conditions
+		// Check entry conditions for both short and long opportunities
 		openPositions := rbe.strategyEngine.GetPositionCount()
 
-		signal, err := rbe.strategyEngine.CheckEntry(ticker, strategyBar, eodTime, openPositions)
-		if err != nil {
-			// Entry conditions not met, skip
-			continue
-		}
+		// CheckBothDirections returns all valid signals (both short and long)
+		tickerSignals := rbe.strategyEngine.CheckBothDirections(ticker, strategyBar, eodTime, openPositions)
 
-		// Re-check with previous bar for pattern detection if available
-		if !previousBar.Time.IsZero() {
-			// Try checking with previous bar for better pattern detection
-			entryChecker := strategy.NewEntryChecker()
-			if updatedSignal, err := entryChecker.CheckEntryConditionsWithPrevious(
-				ticker,
-				strategyBar,
-				previousBar,
-				tickerState,
-				openPositions,
-				eodTime,
-			); err == nil {
-				signal = updatedSignal
-			}
-		}
-
-		// Add to signals list
-		signals = append(signals, signal)
+		// Add all signals from this ticker to the signals list
+		signals = append(signals, tickerSignals...)
 	}
 
 	// Score and select best signals (up to max positions)

@@ -23,7 +23,7 @@ type IndicatorState struct {
 	LastUpdate time.Time
 }
 
-// DeathCandlePattern represents detected pattern types
+// DeathCandlePattern represents detected pattern types (both bearish and bullish reversal patterns)
 type DeathCandlePattern int
 
 const (
@@ -31,6 +31,9 @@ const (
 	BearishEngulfing
 	RejectionAtExtension
 	ShootingStar
+	BullishEngulfing
+	RejectionAtBottom
+	Hammer
 )
 
 // EntrySignal represents a trading opportunity

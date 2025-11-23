@@ -110,21 +110,40 @@ func (s *Scanner) calculateScore(signal *strategy.EntrySignal) float64 {
 	score += signal.Confidence * 30.0
 
 	// VWAP extension strength (0-50, weighted 25%)
+	// Use absolute value so both directions score equally
 	// Stronger extension = higher score (up to 3x ATR)
-	extensionScore := signal.VWAPExtension
-	if extensionScore > 3.0 {
-		extensionScore = 3.0
+	absExtension := signal.VWAPExtension
+	if absExtension < 0 {
+		absExtension = -absExtension
 	}
-	score += (extensionScore / 3.0) * 25.0
+	if absExtension > 3.0 {
+		absExtension = 3.0
+	}
+	score += (absExtension / 3.0) * 25.0
 
 	// RSI strength (0-50, weighted 20%)
-	// Higher RSI = higher score (70+ is very overbought)
-	rsiScore := (signal.RSI - 65.0) / 35.0 // Normalize from 65-100 to 0-1
-	if rsiScore > 1.0 {
-		rsiScore = 1.0
-	}
-	if rsiScore < 0 {
-		rsiScore = 0
+	var rsiScore float64
+	if signal.Direction == "SHORT" {
+		// For shorts: Higher RSI = higher score (70+ is very overbought)
+		// Normalize from 65-100 to 0-1
+		rsiScore = (signal.RSI - 65.0) / 35.0
+		if rsiScore > 1.0 {
+			rsiScore = 1.0
+		}
+		if rsiScore < 0 {
+			rsiScore = 0
+		}
+	} else {
+		// For longs: Lower RSI = higher score (30- is very oversold)
+		// Normalize from 65-30 to 0-1 (inverse)
+		// RSI 30 = score 1.0, RSI 65 = score 0.0
+		rsiScore = (35.0 - signal.RSI) / 35.0
+		if rsiScore > 1.0 {
+			rsiScore = 1.0
+		}
+		if rsiScore < 0 {
+			rsiScore = 0
+		}
 	}
 	score += rsiScore * 20.0
 
@@ -142,6 +161,12 @@ func (s *Scanner) calculateScore(signal *strategy.EntrySignal) float64 {
 	case strategy.RejectionAtExtension:
 		patternBonus = 8.0
 	case strategy.ShootingStar:
+		patternBonus = 6.0
+	case strategy.BullishEngulfing:
+		patternBonus = 10.0
+	case strategy.RejectionAtBottom:
+		patternBonus = 8.0
+	case strategy.Hammer:
 		patternBonus = 6.0
 	}
 	score += patternBonus
