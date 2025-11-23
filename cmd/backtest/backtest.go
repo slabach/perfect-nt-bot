@@ -161,7 +161,8 @@ func (rbe *RealisticBacktestEngine) Run(barsByDate map[time.Time]map[string][]fe
 			rbe.checkExits(minuteTime, eodTime, minuteBars)
 
 			// Check entries (only if we have buying power and positions available)
-			if rbe.strategyEngine.GetPositionCount() < 3 && rbe.buyingPower.GetAvailableBuyingPower() > 0 {
+			maxPositions := rbe.strategyEngine.GetMaxConcurrentPositions()
+			if rbe.strategyEngine.GetPositionCount() < maxPositions && rbe.buyingPower.GetAvailableBuyingPower() > 0 {
 				rbe.checkEntries(minuteTime, eodTime, minuteBars)
 			}
 		}
@@ -306,18 +307,53 @@ func (rbe *RealisticBacktestEngine) checkEntries(currentTime time.Time, eodTime 
 		signals = append(signals, signal)
 	}
 
-	// Score and select best signals (up to 3 since we can hold 3 positions)
-	maxSignals := 3
+	// Score and select best signals (up to max positions)
+	maxPositions := rbe.strategyEngine.GetMaxConcurrentPositions()
+	currentPositions := rbe.strategyEngine.GetPositionCount()
+	availablePositions := maxPositions - currentPositions
+	
+	if availablePositions <= 0 {
+		return // No positions available
+	}
+	
+	maxSignals := availablePositions
 	if len(signals) < maxSignals {
 		maxSignals = len(signals)
 	}
 	bestSignals := rbe.scanner.SelectBestSignals(signals, maxSignals)
 
 	// Execute entries (can take multiple signals per minute up to max positions)
+	// Each entry checks buying power individually, so we can attempt all signals
 	for _, signal := range bestSignals {
-		if rbe.strategyEngine.GetPositionCount() >= 3 {
-			break // Max positions reached (3 for more opportunities)
+		// Check if we've reached max positions (buying power check happens in executeEntry)
+		if rbe.strategyEngine.GetPositionCount() >= maxPositions {
+			break // Max positions reached
 		}
+		
+		// Check buying power before attempting entry
+		// We need to estimate shares to check if we can afford it
+		// Use a rough estimate: risk amount / stop distance
+		stableBalance := rbe.accountBalance
+		if stableBalance < rbe.cfg.AccountSize*0.8 {
+			stableBalance = rbe.cfg.AccountSize * 0.8
+		}
+		riskAmount := stableBalance * rbe.riskPct
+		
+		// Estimate shares (will be recalculated in executeEntry with actual fill price)
+		estimatedShares := int(riskAmount / math.Abs(signal.EntryPrice-signal.StopLoss))
+		if estimatedShares > 2500 {
+			estimatedShares = 2500
+		}
+		if estimatedShares < 1 {
+			estimatedShares = 1
+		}
+		
+		// Check if we can afford this position (using entry price as estimate)
+		if !rbe.buyingPower.CanAfford(estimatedShares, signal.EntryPrice, signal.Direction) {
+			// Skip this signal - not enough buying power
+			continue
+		}
+		
 		rbe.executeEntry(signal, currentTime)
 	}
 }
@@ -926,6 +962,56 @@ func (rbe *RealisticBacktestEngine) executePartialExit(position *strategy.Positi
 
 	fmt.Printf("  PARTIAL EXIT: %s %d shares @ $%.2f (%s) - Net P&L: $%.2f (Commission: $%.2f) [Fill: $%.2f]\n",
 		position.Ticker, shares, exitPrice, reason, trade.NetPnL, commission, fillPrice)
+}
+
+// RunStats holds statistics for a single backtest run
+type RunStats struct {
+	RunNumber        int
+	TotalTrades      int
+	Wins             int
+	WinRate          float64
+	FinalBalance     float64
+	TotalPnL         float64
+	ProfitTarget     float64
+	AccountSize      float64
+	ReachedTarget    bool
+	Reached75Percent bool
+}
+
+// GetRunStats returns statistics for this backtest run
+func (rbe *RealisticBacktestEngine) GetRunStats() RunStats {
+	stats := RunStats{
+		RunNumber:    rbe.runNumber,
+		TotalTrades:  len(rbe.trades),
+		FinalBalance: rbe.accountBalance,
+		TotalPnL:     rbe.accountBalance - rbe.cfg.AccountSize,
+		ProfitTarget: rbe.cfg.ProfitTarget,
+		AccountSize:  rbe.cfg.AccountSize,
+	}
+
+	if len(rbe.trades) > 0 {
+		wins := 0
+		for _, trade := range rbe.trades {
+			if trade.NetPnL > 0 {
+				wins++
+			}
+		}
+		stats.Wins = wins
+		stats.WinRate = float64(wins) / float64(len(rbe.trades)) * 100
+	}
+
+	// Check if profit target was reached
+	stats.ReachedTarget = rbe.accountBalance >= rbe.cfg.ProfitTarget
+
+	// Check if reached at least 75% of profit target
+	// Profit needed = profitTarget - accountSize
+	// 75% of profit needed = (profitTarget - accountSize) * 0.75
+	// So: finalBalance >= accountSize + (profitTarget - accountSize) * 0.75
+	profitNeeded := rbe.cfg.ProfitTarget - rbe.cfg.AccountSize
+	seventyFivePercentThreshold := rbe.cfg.AccountSize + (profitNeeded * 0.75)
+	stats.Reached75Percent = rbe.accountBalance >= seventyFivePercentThreshold
+
+	return stats
 }
 
 // printResults prints backtest results

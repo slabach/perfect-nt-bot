@@ -243,3 +243,8 @@ func (se *StrategyEngine) MarkTarget2Filled(ticker string) {
 func (se *StrategyEngine) CloseAllPositions() []*Position {
 	return se.positionMgr.CloseAllPositions()
 }
+
+// GetMaxConcurrentPositions returns the maximum concurrent positions allowed
+func (se *StrategyEngine) GetMaxConcurrentPositions() int {
+	return se.entryChecker.GetMaxConcurrentPositions()
+}

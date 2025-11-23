@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -147,6 +149,7 @@ func runRealisticBacktest(
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var firstError error
+	var allRunStats []RunStats
 
 	for i := 1; i <= runs; i++ {
 		wg.Add(1)
@@ -182,6 +185,12 @@ func runRealisticBacktest(
 				return
 			}
 
+			// Collect statistics from this run
+			stats := engine.GetRunStats()
+			mu.Lock()
+			allRunStats = append(allRunStats, stats)
+			mu.Unlock()
+
 			fmt.Printf("[Run %d/%d] Completed successfully\n", runNum, runs)
 		}(i)
 	}
@@ -193,6 +202,84 @@ func runRealisticBacktest(
 		return firstError
 	}
 
+	// Print combined statistics if we have multiple runs
+	if runs > 1 && len(allRunStats) > 0 {
+		// Sort stats by run number for consistent output
+		sort.Slice(allRunStats, func(i, j int) bool {
+			return allRunStats[i].RunNumber < allRunStats[j].RunNumber
+		})
+		printCombinedStats(allRunStats, cfg.ProfitTarget)
+	}
+
 	fmt.Printf("\nAll %d backtest(s) completed successfully!\n", runs)
 	return nil
+}
+
+// printCombinedStats prints combined statistics across all runs
+func printCombinedStats(allRunStats []RunStats, profitTarget float64) {
+	fmt.Println("\n" + strings.Repeat("=", 60))
+	fmt.Println("=== COMBINED MULTI-RUN STATISTICS ===")
+	fmt.Println(strings.Repeat("=", 60))
+
+	// Calculate combined win rate
+	totalTrades := 0
+	totalWins := 0
+	for _, stats := range allRunStats {
+		totalTrades += stats.TotalTrades
+		totalWins += stats.Wins
+	}
+
+	var combinedWinRate float64
+	if totalTrades > 0 {
+		combinedWinRate = float64(totalWins) / float64(totalTrades) * 100
+	}
+
+	fmt.Printf("Combined Win Rate: %.2f%% (%d wins / %d total trades)\n",
+		combinedWinRate, totalWins, totalTrades)
+
+	// Count runs that reached or reached at least 75% of profit target
+	runsReachedTarget := make([]int, 0)
+	runsReached75Percent := make([]int, 0)
+
+	// Calculate 75% threshold for display
+	var accountSize float64
+	if len(allRunStats) > 0 {
+		accountSize = allRunStats[0].AccountSize
+	}
+	profitNeeded := profitTarget - accountSize
+	seventyFivePercentThreshold := accountSize + (profitNeeded * 0.75)
+
+	for _, stats := range allRunStats {
+		if stats.ReachedTarget {
+			runsReachedTarget = append(runsReachedTarget, stats.RunNumber)
+		} else if stats.Reached75Percent {
+			runsReached75Percent = append(runsReached75Percent, stats.RunNumber)
+		}
+	}
+
+	totalReachedOr75Percent := len(runsReachedTarget) + len(runsReached75Percent)
+
+	fmt.Printf("\nProfit Target: $%.2f (Account: $%.2f, Profit Needed: $%.2f)\n",
+		profitTarget, accountSize, profitNeeded)
+	fmt.Printf("75%% Threshold: $%.2f (at least $%.2f profit)\n",
+		seventyFivePercentThreshold, profitNeeded*0.75)
+	fmt.Printf("\nRuns that reached profit target: %d\n", len(runsReachedTarget))
+	if len(runsReachedTarget) > 0 {
+		fmt.Printf("  Runs: %v\n", runsReachedTarget)
+	}
+
+	fmt.Printf("Runs that reached at least 75%% of profit target: %d\n", len(runsReached75Percent))
+	if len(runsReached75Percent) > 0 {
+		fmt.Printf("  Runs: %v\n", runsReached75Percent)
+	}
+
+	fmt.Printf("\nTotal runs that reached or reached at least 75%% of profit target: %d\n",
+		totalReachedOr75Percent)
+	if totalReachedOr75Percent > 0 {
+		allTargetRuns := append(runsReachedTarget, runsReached75Percent...)
+		sort.Ints(allTargetRuns)
+		fmt.Printf("  All qualifying runs: %v\n", allTargetRuns)
+	}
+
+	fmt.Println(strings.Repeat("=", 60))
 }
