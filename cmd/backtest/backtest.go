@@ -118,7 +118,11 @@ func (rbe *RealisticBacktestEngine) Run(barsByDate map[time.Time]map[string][]fe
 
 		// Check if trading is allowed
 		if !rbe.riskLimits.CanTrade() {
-			fmt.Printf("  Trading stopped: Daily loss hit or account closed\n")
+			reason := "Daily loss hit or account closed"
+			if rbe.riskLimits.IsProtectGainsTriggered() {
+				reason = "Protect gains triggered (gave back >50% of excess above 2x daily goal)"
+			}
+			fmt.Printf("  Trading stopped: %s\n", reason)
 			continue
 		}
 
@@ -160,9 +164,11 @@ func (rbe *RealisticBacktestEngine) Run(barsByDate map[time.Time]map[string][]fe
 			// Check exits first (manage existing positions)
 			rbe.checkExits(minuteTime, eodTime, minuteBars)
 
-			// Check entries (only if we have buying power and positions available)
+			// Check entries (only if we have buying power, positions available, and trading is allowed)
 			maxPositions := rbe.strategyEngine.GetMaxConcurrentPositions()
-			if rbe.strategyEngine.GetPositionCount() < maxPositions && rbe.buyingPower.GetAvailableBuyingPower() > 0 {
+			if rbe.strategyEngine.GetPositionCount() < maxPositions &&
+				rbe.buyingPower.GetAvailableBuyingPower() > 0 &&
+				rbe.riskLimits.CanTrade() {
 				rbe.checkEntries(minuteTime, eodTime, minuteBars)
 			}
 		}
@@ -311,11 +317,11 @@ func (rbe *RealisticBacktestEngine) checkEntries(currentTime time.Time, eodTime 
 	maxPositions := rbe.strategyEngine.GetMaxConcurrentPositions()
 	currentPositions := rbe.strategyEngine.GetPositionCount()
 	availablePositions := maxPositions - currentPositions
-	
+
 	if availablePositions <= 0 {
 		return // No positions available
 	}
-	
+
 	maxSignals := availablePositions
 	if len(signals) < maxSignals {
 		maxSignals = len(signals)
@@ -329,7 +335,7 @@ func (rbe *RealisticBacktestEngine) checkEntries(currentTime time.Time, eodTime 
 		if rbe.strategyEngine.GetPositionCount() >= maxPositions {
 			break // Max positions reached
 		}
-		
+
 		// Check buying power before attempting entry
 		// We need to estimate shares to check if we can afford it
 		// Use a rough estimate: risk amount / stop distance
@@ -338,7 +344,7 @@ func (rbe *RealisticBacktestEngine) checkEntries(currentTime time.Time, eodTime 
 			stableBalance = rbe.cfg.AccountSize * 0.8
 		}
 		riskAmount := stableBalance * rbe.riskPct
-		
+
 		// Estimate shares (will be recalculated in executeEntry with actual fill price)
 		estimatedShares := int(riskAmount / math.Abs(signal.EntryPrice-signal.StopLoss))
 		if estimatedShares > 2500 {
@@ -347,13 +353,13 @@ func (rbe *RealisticBacktestEngine) checkEntries(currentTime time.Time, eodTime 
 		if estimatedShares < 1 {
 			estimatedShares = 1
 		}
-		
+
 		// Check if we can afford this position (using entry price as estimate)
 		if !rbe.buyingPower.CanAfford(estimatedShares, signal.EntryPrice, signal.Direction) {
 			// Skip this signal - not enough buying power
 			continue
 		}
-		
+
 		rbe.executeEntry(signal, currentTime)
 	}
 }
@@ -379,14 +385,14 @@ func (rbe *RealisticBacktestEngine) executeEntry(signal *strategy.EntrySignal, e
 	fillPrice := strategy.GetFillPrice(strategyBar, signal.Direction, true)
 
 	// Calculate position size based on fill price (not signal price) to account for slippage
-	// Use riskPct (0.3% = 0.003) of account balance, but use a stable base to prevent
+	// Use riskPct (0.35% = 0.0035) of account balance, but use a stable base to prevent
 	// position sizes from shrinking too much after losses
 	// Use max of current balance or 80% of initial to maintain reasonable position sizes
 	stableBalance := rbe.accountBalance
 	if stableBalance < rbe.cfg.AccountSize*0.8 {
 		stableBalance = rbe.cfg.AccountSize * 0.8
 	}
-	riskAmount := stableBalance * rbe.riskPct // 0.3% of stable balance (e.g., $75 for $25k)
+	riskAmount := stableBalance * rbe.riskPct // 0.35% of stable balance (e.g., $87.50 for $25k)
 
 	// Log account balance and risk amount for debugging
 	fmt.Printf("  [POSITION SIZING] Account: $%.2f, Stable: $%.2f, Risk Amount: $%.2f\n",
@@ -485,10 +491,18 @@ func (rbe *RealisticBacktestEngine) checkDailyLossLimit(minuteBars []TickerBar, 
 			realizedPnL, unrealizedPnL, totalDailyPnL, -maxAllowedLoss)
 		fmt.Printf("  [DAILY LOSS LIMIT] Closing all %d open positions immediately\n", len(positions))
 
+		// Make a copy of positions list to avoid issues with modifying the list during iteration
+		positionsToClose := make([]*strategy.Position, len(positions))
+		copy(positionsToClose, positions)
+
 		// Close all positions at their current prices
 		// executeExit will automatically cap each position's loss to stay within the daily limit
 		// as each position closes, the remaining allowed loss shrinks for subsequent positions
-		for i, position := range positions {
+		for i, position := range positionsToClose {
+			// Check if position still exists (might have been closed already)
+			if !rbe.strategyEngine.HasPosition(position.Ticker) {
+				continue
+			}
 			currentBar, exists := barMap[position.Ticker]
 			if !exists {
 				// Use stored current bar if available
@@ -810,29 +824,8 @@ func (rbe *RealisticBacktestEngine) executeExit(position *strategy.Position, exi
 	fmt.Printf("  EXIT: %s %d shares @ $%.2f (%s) - Net P&L: $%.2f (Commission: $%.2f) [Fill: $%.2f]\n",
 		position.Ticker, shares, exitPrice, reason, trade.NetPnL, commission, fillPrice)
 
-	// If daily loss limit was hit, close all remaining positions at their current prices
-	// This must be done AFTER closing the current position to avoid infinite recursion
-	if rbe.riskLimits.IsDailyLossHit() {
-		remainingPositions := rbe.strategyEngine.GetPositions()
-		for _, remainingPosition := range remainingPositions {
-			// Get current bar for remaining position
-			currentBar, exists := rbe.currentBars[remainingPosition.Ticker]
-			if !exists {
-				// Use entry price as fallback (scratch trade)
-				currentBar = &feed.Bar{
-					Time:   exitTime,
-					Open:   remainingPosition.EntryPrice,
-					High:   remainingPosition.EntryPrice,
-					Low:    remainingPosition.EntryPrice,
-					Close:  remainingPosition.EntryPrice,
-					Volume: 0,
-				}
-			}
-			// Close at current price with Max Daily Loss reason
-			// Note: executeExit will check daily loss limit again and cap losses appropriately
-			rbe.executeExit(remainingPosition, currentBar.Close, strategy.ExitReasonMaxDailyLoss, exitTime)
-		}
-	}
+	// Note: If daily loss limit was hit, checkDailyLossLimit() already handles closing
+	// all remaining positions. We don't need to do it here to avoid double-closing.
 }
 
 // executePartialExit executes a partial exit (e.g., target 1)

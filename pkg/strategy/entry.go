@@ -19,15 +19,15 @@ type EntryChecker struct {
 // NewEntryChecker creates a new entry checker with default parameters
 func NewEntryChecker() *EntryChecker {
 	return &EntryChecker{
-		// Priority 2 Fix: Relaxed entry filters to increase trade frequency
-		vwapExtensionThreshold: 0.45, // Reduced from 0.50x to 0.45x ATR to capture more opportunities
-		rsiThreshold:          53.0,  // Reduced from 55.0 to 53.0 to capture more opportunities
-		minVolumeMA:           0.60,   // Reduced from 0.65x to 0.60x average to capture more opportunities
+		// Priority 2 Fix: Balanced entry filters for quality and frequency
+		vwapExtensionThreshold: 0.42, // Balanced at 0.42x ATR (between 0.40 and 0.45 for quality/frequency balance)
+		rsiThreshold:          52.0,  // Balanced at 52.0 (between 51.0 and 53.0 for quality/frequency balance)
+		minVolumeMA:           0.57,   // Balanced at 0.57x average (between 0.55 and 0.60 for quality/frequency balance)
 		target1Profit:         0.15,  // $0.15/share for first target (larger targets to overcome commissions)
 		target2Profit:         0.25,  // $0.25/share for second target (better risk/reward)
-		// Phase 1 Fix #3: Tightened stop loss
-		atrStopMultiplier:    1.0,   // Reduced from 1.2x to 1.0x ATR (tighter stops for better risk/reward)
-		maxConcurrentPositions: 5,   // Increased from 4 to 5 for more opportunities
+		// Phase 1 Fix #3: Tightened stop loss further for better risk/reward
+		atrStopMultiplier:    0.9,   // Reduced from 1.0x to 0.9x ATR (tighter stops for better risk/reward)
+		maxConcurrentPositions: 6,   // Increased from 5 to 6 for more opportunities
 	}
 }
 
@@ -45,14 +45,14 @@ func (ec *EntryChecker) CheckEntryConditions(
 		return nil, fmt.Errorf("past EOD cutoff")
 	}
 
-	// Priority 2 Fix: Extended entry window to 2:45 PM to capture more opportunities
+	// Priority 2 Fix: Extended entry window to 3:00 PM to capture more opportunities
 	// Still avoid entries too late in the day to prevent EOD losses
 	entryHour := bar.Time.Hour()
 	entryMinute := bar.Time.Minute()
 	
-	// Avoid entries after 2:45 PM (14:45) - extended from 2:30 PM
-	if entryHour > 14 || (entryHour == 14 && entryMinute >= 45) {
-		return nil, fmt.Errorf("entry too late in day (hour: %d:%02d, need: < 14:45)", entryHour, entryMinute)
+	// Avoid entries after 3:00 PM (15:00) - extended from 2:45 PM
+	if entryHour > 15 || (entryHour == 15 && entryMinute >= 0) {
+		return nil, fmt.Errorf("entry too late in day (hour: %d:%02d, need: < 15:00)", entryHour, entryMinute)
 	}
 	
 	// Avoid entries in first 15 minutes of market open (9:30-9:45 AM)
@@ -73,9 +73,9 @@ func (ec *EntryChecker) CheckEntryConditions(
 		return nil, fmt.Errorf("indicators not ready")
 	}
 
-	// Minimum price filter: avoid stocks < $2.50 (reduced from $3.00 for more opportunities)
-	if currentPrice < 2.5 {
-		return nil, fmt.Errorf("price too low (price: $%.2f, need: >= $2.50)", currentPrice)
+	// Minimum price filter: avoid stocks < $2.00 (reduced from $2.50 for more opportunities)
+	if currentPrice < 2.0 {
+		return nil, fmt.Errorf("price too low (price: $%.2f, need: >= $2.00)", currentPrice)
 	}
 
 	// Minimum volume filter: require at least 100k daily volume for liquidity (very relaxed for more opportunities)
@@ -171,14 +171,14 @@ func (ec *EntryChecker) CheckEntryConditionsWithPrevious(
 	// Priority 3 Fix: Momentum filter - require price moving away from VWAP
 	// For short entries, we want to see price moving up (current > previous close)
 	// This indicates momentum away from VWAP, making it more likely to hit Target 1
-	// Allow small negative movements (>= -$0.05) to account for noise and capture reversals
+	// Allow small negative movements (>= -$0.08) to account for noise and capture reversals
 	if !previousBar.Time.IsZero() {
 		priceMomentum := currentBar.Close - previousBar.Close
 		// For shorts, we want positive momentum (price going up, away from VWAP)
-		// Allow small negative movements (>= -$0.05/share) to account for market noise and capture early reversals
+		// Allow small negative movements (>= -$0.08/share) to account for market noise and capture early reversals
 		// But filter out clear reversals where price is moving back toward VWAP
-		if priceMomentum < -0.05 {
-			return nil, fmt.Errorf("price moving back toward VWAP (price change: %.4f, need: >= -0.05 for short entry)", priceMomentum)
+		if priceMomentum < -0.08 {
+			return nil, fmt.Errorf("price moving back toward VWAP (price change: %.4f, need: >= -0.08 for short entry)", priceMomentum)
 		}
 	}
 	
@@ -188,8 +188,8 @@ func (ec *EntryChecker) CheckEntryConditionsWithPrevious(
 	if pattern == NoPattern {
 		vwapExtension := GetVWAPExtension(currentPrice, indicators.VWAP, indicators.ATR)
 		
-		// Check if volume is strong (above 0.9x average) - lower threshold for more opportunities
-		strongVolume := indicators.VolumeMA > 0 && float64(currentBar.Volume) > indicators.VolumeMA*0.9
+		// Check if volume is strong (above 0.85x average) - lower threshold for more opportunities
+		strongVolume := indicators.VolumeMA > 0 && float64(currentBar.Volume) > indicators.VolumeMA*0.85
 		
 		// If volume is strong, allow entry with normal thresholds
 		if strongVolume {
@@ -197,9 +197,9 @@ func (ec *EntryChecker) CheckEntryConditionsWithPrevious(
 			// This will be checked in CheckEntryConditions, so we just allow it here
 		} else {
 			// Without strong volume, require only slightly higher VWAP extension and RSI
-			// Reduced thresholds from 0.60x/58 to 0.55x/56 to capture more opportunities
-			requiredExtension := 0.55 // Reduced from 0.60x (still higher than normal 0.45x threshold)
-			requiredRSI := 56.0       // Reduced from 58.0 (still higher than normal 53 threshold)
+			// Reduced thresholds from 0.55x/56 to 0.50x/54 to capture more opportunities
+			requiredExtension := 0.50 // Reduced from 0.55x (still higher than normal 0.40x threshold)
+			requiredRSI := 54.0       // Reduced from 56.0 (still higher than normal 51 threshold)
 			
 			if vwapExtension < requiredExtension || indicators.RSI < requiredRSI {
 				return nil, fmt.Errorf("no death candle pattern detected - requires stronger setup (VWAP: %.2f>=%.2f ATR, RSI: %.1f>=%.1f) or strong volume", 

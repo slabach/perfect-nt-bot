@@ -19,7 +19,7 @@ func main() {
 	tickerFlag := flag.String("ticker", "", "Single ticker symbol to backtest")
 	daysFlag := flag.Int("days", 30, "Number of days to look back")
 	accountFlag := flag.Float64("account", 25000, "Initial account size")
-	riskFlag := flag.Float64("risk", 0.005, "Risk percentage per trade (default: 0.005 for 0.5%)")
+	riskFlag := flag.Float64("risk", 0.0035, "Risk percentage per trade (default: 0.0035 for 0.35%)")
 	evalFlag := flag.Bool("eval", true, "Enable eval mode - limits single trade profit to 1.8% of account size")
 	realisticFlag := flag.Bool("realistic", false, "Use realistic backtest engine (day-by-day processing)")
 	runsFlag := flag.Int("runs", 1, "Number of backtests to run simultaneously (default: 1)")

@@ -50,15 +50,15 @@ func (ec *ExitChecker) CheckExitConditions(
 	}
 
 	// Priority 1 Fix: Improved EOD Exit Logic
-	// Exit ALL unprofitable positions by 2:00 PM (110 minutes before EOD)
+	// Exit ALL unprofitable positions by 1:30 PM (140 minutes before EOD)
 	// This prevents positions from being held all day and losing money at EOD
-	unprofitableExitTime := eodTime.Add(-110 * time.Minute) // 2:00 PM
+	unprofitableExitTime := eodTime.Add(-140 * time.Minute) // 1:30 PM
 	if currentTime.After(unprofitableExitTime) || currentTime.Equal(unprofitableExitTime) {
 		if pnlPerShare <= 0 {
-			// Not profitable by 2:00 PM - exit now to avoid EOD losses
+			// Not profitable by 1:30 PM - exit now to avoid EOD losses
 			return true, ExitReasonTimeDecay, currentPrice
 		}
-		// Profitable by 2:00 PM - allow to hold until EOD or target
+		// Profitable by 1:30 PM - allow to hold until EOD or target
 	}
 
 	// Check EOD (3:50 PM ET) - must close all remaining positions
