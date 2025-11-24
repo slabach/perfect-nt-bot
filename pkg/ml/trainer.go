@@ -225,13 +225,13 @@ func TrainOnHistoricalData(
 		// Path doesn't have an extension, assume it should be .json
 		finalModelPath = modelPath + ".json"
 	}
-	
+
 	// Create directory if it doesn't exist
 	dir := filepath.Dir(finalModelPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("failed to create model directory: %v", err)
 	}
-	
+
 	// Save model
 	if err := model.Save(finalModelPath); err != nil {
 		return fmt.Errorf("failed to save model: %v", err)
@@ -265,9 +265,9 @@ func simulateTradeOutcome(
 		// Check high/low prices to see if stop or target was hit intra-bar
 		// For SHORT: stop is above entry (check High), target is below entry (check Low)
 		// For LONG: stop is below entry (check Low), target is above entry (check High)
-		
+
 		var stopHit, target1Hit bool
-		
+
 		if signal.Direction == "SHORT" {
 			// Stop loss: price went above stop level (check high)
 			stopHit = tickerBar.Bar.High >= signal.StopLoss
@@ -285,7 +285,7 @@ func simulateTradeOutcome(
 		if stopHit {
 			return 0.0 // Loss
 		}
-		
+
 		if target1Hit {
 			return 1.0 // Win
 		}
@@ -294,4 +294,3 @@ func simulateTradeOutcome(
 	// If neither hit by EOD, consider it a loss (didn't reach target)
 	return 0.0
 }
-

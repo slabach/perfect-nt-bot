@@ -41,38 +41,38 @@ const (
 
 // EntrySignal represents a trading opportunity
 type EntrySignal struct {
-	Ticker              string
-	EntryPrice          float64
-	Direction           string // "SHORT" or "LONG"
-	StopLoss            float64
-	Target1             float64 // First profit target
-	Target2             float64 // Second profit target
-	Confidence          float64 // 0-1 score
-	VWAPExtension       float64 // How far above/below VWAP (in ATR multiples)
-	Pattern             DeathCandlePattern
-	RSI                 float64
-	Volume              int64
-	Timestamp           time.Time
-	Reason              string // Human-readable reason for entry
-	MLScore             float64 // ML model prediction (0-1 probability of hitting Target 1)
+	Ticker        string
+	EntryPrice    float64
+	Direction     string // "SHORT" or "LONG"
+	StopLoss      float64
+	Target1       float64 // First profit target
+	Target2       float64 // Second profit target
+	Confidence    float64 // 0-1 score
+	VWAPExtension float64 // How far above/below VWAP (in ATR multiples)
+	Pattern       DeathCandlePattern
+	RSI           float64
+	Volume        int64
+	Timestamp     time.Time
+	Reason        string  // Human-readable reason for entry
+	MLScore       float64 // ML model prediction (0-1 probability of hitting Target 1)
 }
 
 // Position represents an open trading position
 type Position struct {
-	Ticker           string
-	EntryPrice       float64
-	Shares           int
-	Direction        string // "SHORT" or "LONG"
-	EntryTime        time.Time
-	StopLoss        float64
-	Target1          float64
-	Target2          float64
-	RemainingShares  int    // After partial fills
-	FilledTarget1    bool
-	FilledTarget2    bool
-	TrailingStop     *float64 // Active trailing stop price
-	StrategyState    *IndicatorState
-	Pattern          DeathCandlePattern
+	Ticker              string
+	EntryPrice          float64
+	Shares              int
+	Direction           string // "SHORT" or "LONG"
+	EntryTime           time.Time
+	StopLoss            float64
+	Target1             float64
+	Target2             float64
+	RemainingShares     int // After partial fills
+	FilledTarget1       bool
+	FilledTarget2       bool
+	TrailingStop        *float64 // Active trailing stop price
+	StrategyState       *IndicatorState
+	Pattern             DeathCandlePattern
 	TimeDecayWindow1Hit bool // Track if we've hit the first time decay window
 }
 
@@ -92,15 +92,15 @@ const (
 
 // TradeResult represents a completed trade
 type TradeResult struct {
-	Ticker      string
-	EntryTime   time.Time
-	ExitTime    time.Time
-	EntryPrice  float64
-	ExitPrice   float64
-	Shares      int
-	Direction   string
-	Reason      ExitReason
-	PnL         float64
-	Commission  float64
-	NetPnL      float64
+	Ticker     string
+	EntryTime  time.Time
+	ExitTime   time.Time
+	EntryPrice float64
+	ExitPrice  float64
+	Shares     int
+	Direction  string
+	Reason     ExitReason
+	PnL        float64
+	Commission float64
+	NetPnL     float64
 }

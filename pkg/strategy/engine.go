@@ -8,23 +8,23 @@ import (
 // StrategyEngine manages the complete strategy logic
 type StrategyEngine struct {
 	// Per-ticker calculators (will need separate instances per ticker)
-	entryChecker  *EntryChecker
-	exitChecker   *ExitChecker
-	positionMgr   *PositionManager
-	
+	entryChecker *EntryChecker
+	exitChecker  *ExitChecker
+	positionMgr  *PositionManager
+
 	// Per-ticker state
-	tickerStates  map[string]*IndicatorState
-	tickerBars    map[string][]Bar // History for pattern detection
-	tickerVWAPs   map[string]*VWAPCalculator
-	tickerATRs    map[string]*ATRCalculator
-	tickerRSIs    map[string]*RSICalculator
-	
+	tickerStates map[string]*IndicatorState
+	tickerBars   map[string][]Bar // History for pattern detection
+	tickerVWAPs  map[string]*VWAPCalculator
+	tickerATRs   map[string]*ATRCalculator
+	tickerRSIs   map[string]*RSICalculator
+
 	// Market hours
-	location      *time.Location
-	eodTime       time.Time
-	
+	location *time.Location
+	eodTime  time.Time
+
 	// Configuration
-	marketOpen    time.Time
+	marketOpen time.Time
 }
 
 // NewStrategyEngine creates a new strategy engine
@@ -46,12 +46,12 @@ func NewStrategyEngine(location *time.Location, marketOpen time.Time) *StrategyE
 // ResetDailyState resets daily state (call at market open)
 func (se *StrategyEngine) ResetDailyState(marketOpen time.Time) {
 	se.marketOpen = marketOpen
-	
+
 	// Reset performance tracker for adaptive thresholds
 	if se.entryChecker != nil {
 		se.entryChecker.ResetDaily()
 	}
-	
+
 	// Reset per-ticker indicators (preserve previous day data)
 	for ticker := range se.tickerStates {
 		existingState := se.tickerStates[ticker]
@@ -61,12 +61,12 @@ func (se *StrategyEngine) ResetDailyState(marketOpen time.Time) {
 			prevDayHigh = existingState.PreviousDayHigh
 			prevDayClose = existingState.PreviousDayClose
 		}
-		
+
 		se.tickerStates[ticker] = &IndicatorState{
 			PreviousDayHigh:  prevDayHigh,
 			PreviousDayClose: prevDayClose,
 		}
-		
+
 		// Reset calculators for this ticker
 		if vwap, exists := se.tickerVWAPs[ticker]; exists {
 			vwap.Reset(marketOpen)
@@ -144,13 +144,13 @@ func (se *StrategyEngine) UpdateTicker(ticker string, bar Bar) {
 		prevDayHigh = existingState.PreviousDayHigh
 		prevDayClose = existingState.PreviousDayClose
 	}
-	
+
 	se.tickerStates[ticker] = &IndicatorState{
-		VWAP:           vwap.GetVWAP(),
-		ATR:            atr.GetATR(),
-		RSI:            rsi.GetRSI(),
-		VolumeMA:       volumeMA,
-		LastUpdate:     bar.Time,
+		VWAP:             vwap.GetVWAP(),
+		ATR:              atr.GetATR(),
+		RSI:              rsi.GetRSI(),
+		VolumeMA:         volumeMA,
+		LastUpdate:       bar.Time,
 		PreviousDayHigh:  prevDayHigh,
 		PreviousDayClose: prevDayClose,
 	}
@@ -176,20 +176,20 @@ func (se *StrategyEngine) GetRecentBars(ticker string, count int) []Bar {
 // CheckEntry checks if entry conditions are met for a ticker (checks both short and long)
 func (se *StrategyEngine) CheckEntry(ticker string, bar Bar, eodTime time.Time, openPositions int) (*EntrySignal, error) {
 	signals := se.CheckBothDirections(ticker, bar, eodTime, openPositions)
-	
+
 	// Return the first signal found (short has priority, but scoring will handle ranking)
 	// If both exist, scoring will rank them properly in the backtest
 	if len(signals) > 0 {
 		return signals[0], nil
 	}
-	
+
 	return nil, fmt.Errorf("no entry signals found")
 }
 
 // CheckBothDirections checks both short and long entry opportunities for a ticker
 func (se *StrategyEngine) CheckBothDirections(ticker string, bar Bar, eodTime time.Time, openPositions int) []*EntrySignal {
 	signals := make([]*EntrySignal, 0)
-	
+
 	// Get ticker state
 	state, exists := se.tickerStates[ticker]
 	if !exists {
@@ -205,7 +205,7 @@ func (se *StrategyEngine) CheckBothDirections(ticker string, bar Bar, eodTime ti
 	// Check short entry conditions
 	var shortSignal *EntrySignal
 	var err error
-	
+
 	if !previousBar.Time.IsZero() {
 		// Use previous bar for better pattern detection
 		shortSignal, err = se.entryChecker.CheckEntryConditionsWithPrevious(
@@ -228,14 +228,14 @@ func (se *StrategyEngine) CheckBothDirections(ticker string, bar Bar, eodTime ti
 			eodTime,
 		)
 	}
-	
+
 	if err == nil && shortSignal != nil {
 		signals = append(signals, shortSignal)
 	}
 
 	// Check long entry conditions
 	var longSignal *EntrySignal
-	
+
 	if !previousBar.Time.IsZero() {
 		// Use previous bar for better pattern detection
 		longSignal, err = se.entryChecker.CheckLongEntryConditionsWithPrevious(
@@ -258,7 +258,7 @@ func (se *StrategyEngine) CheckBothDirections(ticker string, bar Bar, eodTime ti
 			eodTime,
 		)
 	}
-	
+
 	if err == nil && longSignal != nil {
 		signals = append(signals, longSignal)
 	}
@@ -273,7 +273,7 @@ func (se *StrategyEngine) CheckExits(bar Bar, eodTime time.Time) []ExitSignal {
 
 	for _, position := range positions {
 		shouldExit, reason, exitPrice := se.exitChecker.CheckExitConditions(position, bar, eodTime)
-		
+
 		if shouldExit {
 			exits = append(exits, ExitSignal{
 				Ticker:    position.Ticker,

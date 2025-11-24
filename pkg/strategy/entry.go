@@ -46,7 +46,7 @@ func NewEntryChecker() *EntryChecker {
 		atrStopMultiplier:      0.85, // Back to 0.85x ATR - 0.80x was too tight, causing premature stops
 		maxConcurrentPositions: 3,    // Keep at 3 - allow some diversification
 		performanceTracker:     NewPerformanceTracker(),
-		enableAdaptive:         true, // Enable adaptive thresholds by default
+		enableAdaptive:         false, // Disable adaptive thresholds by default - they tighten too much after losses
 	}
 }
 
@@ -112,9 +112,12 @@ func (pt *PerformanceTracker) Reset() {
 }
 
 // GetAdaptiveThresholds returns adjusted thresholds based on recent performance
+// Uses the configured thresholds as the base (not hardcoded values)
 func (ec *EntryChecker) GetAdaptiveThresholds() (vwapThreshold, rsiThreshold float64) {
-	baseVWAP := 0.55
-	baseRSI := 55.0
+	// Use configured thresholds as base (not hardcoded values!)
+	// This was a critical bug: adaptive was using 0.55 instead of configured 0.45
+	baseVWAP := ec.vwapExtensionThreshold
+	baseRSI := ec.rsiThreshold
 
 	if !ec.enableAdaptive || ec.performanceTracker == nil {
 		return baseVWAP, baseRSI
@@ -123,14 +126,15 @@ func (ec *EntryChecker) GetAdaptiveThresholds() (vwapThreshold, rsiThreshold flo
 	recentWinRate := ec.performanceTracker.GetRecentWinRate(5)
 
 	if recentWinRate < 0.3 {
-		// Poor performance: tighten thresholds
-		return baseVWAP + 0.05, baseRSI + 3.0
+		// Poor performance: slightly tighten thresholds (reduced tightening to prevent over-restricting)
+		// Reduced from +0.05/+3.0 to +0.02/+1.0 to avoid killing trade volume after a few losses
+		return baseVWAP + 0.02, baseRSI + 1.0
 	} else if recentWinRate > 0.6 {
 		// Good performance: slightly relax thresholds
 		return baseVWAP - 0.02, baseRSI - 1.0
 	}
 
-	// Default: use base thresholds
+	// Default: use base thresholds (the configured values)
 	return baseVWAP, baseRSI
 }
 
@@ -311,19 +315,10 @@ func (ec *EntryChecker) CheckEntryConditionsWithPrevious(
 	currentPrice := currentBar.Close
 	pattern := DetectDeathCandlePattern(currentBar, previousBar)
 
-	// Priority 3 Fix: Momentum filter - require price moving away from VWAP
-	// For short entries, we want to see price moving up (current > previous close)
-	// This indicates momentum away from VWAP, making it more likely to hit Target 1
-	// Allow small negative movements (>= -$0.08) to account for noise and capture reversals
-	if !previousBar.Time.IsZero() {
-		priceMomentum := currentBar.Close - previousBar.Close
-		// For shorts, we want positive momentum (price going up, away from VWAP)
-		// Allow small negative movements (>= -$0.08/share) to account for market noise and capture early reversals
-		// But filter out clear reversals where price is moving back toward VWAP
-		if priceMomentum < -0.08 {
-			return nil, fmt.Errorf("price moving back toward VWAP (price change: %.4f, need: >= -0.08 for short entry)", priceMomentum)
-		}
-	}
+	// Momentum filter - REMOVED: This conflicted with mean reversion strategy
+	// Mean reversion trades work when price is ALREADY extended from VWAP, not when it's moving further away
+	// The momentum filter was blocking valid mean reversion setups where price was extended but starting to reverse
+	// Original filter required price moving away from VWAP, which is more suited for trend-following strategies
 
 	// Phase 2 Fix #4: Prefer death candle pattern but allow strong setups without pattern
 	// Pattern requirement was too strict - making it optional but preferred
@@ -340,10 +335,20 @@ func (ec *EntryChecker) CheckEntryConditionsWithPrevious(
 			// Strong volume compensates for no pattern - use normal thresholds
 			// This will be checked in CheckEntryConditions, so we just allow it here
 		} else {
-			// Without strong volume, require higher VWAP extension and RSI
-			// These thresholds are higher than the base thresholds (0.62, 58.0)
-			requiredExtension := 0.70 // Higher than base 0.62x - require stronger extensions
-			requiredRSI := 62.0       // Higher than base 58.0 - require more extreme overbought/oversold
+			// Without strong volume, require stronger VWAP extension and RSI
+			// Use configurable thresholds (not hardcoded) - this allows the strategy to be tuned
+			// Get adaptive thresholds if enabled, otherwise use base thresholds
+			vwapThreshold := ec.vwapExtensionThreshold
+			rsiThreshold := ec.rsiThreshold
+			if ec.enableAdaptive {
+				vwapThreshold, rsiThreshold = ec.GetAdaptiveThresholds()
+			}
+
+			// For no-pattern entries, require slightly higher thresholds to compensate
+			// But use the configurable values, not hardcoded ones
+			// Reduced penalty from 15% to 5% to allow more valid setups without patterns
+			requiredExtension := vwapThreshold * 1.05 // 5% higher than configured threshold (reduced from 15%)
+			requiredRSI := rsiThreshold + 1.0         // 1.0 point higher than configured RSI (reduced from 3.0)
 
 			if vwapExtension < requiredExtension || indicators.RSI < requiredRSI {
 				return nil, fmt.Errorf("no death candle pattern detected - requires stronger setup (VWAP: %.2f>=%.2f ATR, RSI: %.1f>=%.1f) or strong volume (1.3x+)",
@@ -525,19 +530,10 @@ func (ec *EntryChecker) CheckLongEntryConditionsWithPrevious(
 	currentPrice := currentBar.Close
 	pattern := DetectBullishReversalPattern(currentBar, previousBar)
 
-	// Momentum filter - require price moving away from VWAP
-	// For long entries, we want to see price moving down (current < previous close)
-	// This indicates momentum away from VWAP, making it more likely to hit Target 1
-	// Allow small positive movements (<= $0.08) to account for noise and capture reversals
-	if !previousBar.Time.IsZero() {
-		priceMomentum := currentBar.Close - previousBar.Close
-		// For longs, we want negative momentum (price going down, away from VWAP)
-		// Allow small positive movements (<= $0.08/share) to account for market noise and capture early reversals
-		// But filter out clear reversals where price is moving back toward VWAP
-		if priceMomentum > 0.08 {
-			return nil, fmt.Errorf("price moving back toward VWAP (price change: %.4f, need: <= 0.08 for long entry)", priceMomentum)
-		}
-	}
+	// Momentum filter - REMOVED: This conflicted with mean reversion strategy
+	// Mean reversion trades work when price is ALREADY extended from VWAP, not when it's moving further away
+	// The momentum filter was blocking valid mean reversion setups where price was extended but starting to reverse
+	// Original filter required price moving away from VWAP, which is more suited for trend-following strategies
 
 	// Prefer bullish reversal pattern but allow strong setups without pattern
 	// Pattern requirement was too strict - making it optional but preferred
@@ -554,10 +550,21 @@ func (ec *EntryChecker) CheckLongEntryConditionsWithPrevious(
 			// Strong volume compensates for no pattern - use normal thresholds
 			// This will be checked in CheckLongEntryConditions, so we just allow it here
 		} else {
-			// Without strong volume, require higher VWAP extension and RSI
+			// Without strong volume, require stronger VWAP extension and RSI
+			// Use configurable thresholds (not hardcoded) - this allows the strategy to be tuned
+			// Get adaptive thresholds if enabled, otherwise use base thresholds
+			vwapThreshold := ec.vwapExtensionThreshold
+			rsiThreshold := ec.rsiThreshold
+			if ec.enableAdaptive {
+				vwapThreshold, rsiThreshold = ec.GetAdaptiveThresholds()
+			}
+
 			// For longs, we need more negative extension (further below VWAP)
-			requiredExtension := -0.70 // More negative than base -0.62x - require stronger extensions
-			longRSIThreshold := 38.0   // More oversold than base 42.0 (100 - 58 = 42) - require more extreme oversold
+			// For no-pattern entries, require slightly stronger thresholds to compensate
+			// But use the configurable values, not hardcoded ones
+			// Reduced penalty from 15% to 5% to allow more valid setups without patterns
+			requiredExtension := -vwapThreshold * 1.05     // 5% more negative than configured threshold (reduced from 15%)
+			longRSIThreshold := 100.0 - rsiThreshold - 1.0 // 1.0 point more oversold than configured (reduced from 3.0)
 
 			if vwapExtension > requiredExtension || indicators.RSI > longRSIThreshold {
 				return nil, fmt.Errorf("no bullish reversal pattern detected - requires stronger setup (VWAP: %.2f<=%.2f ATR, RSI: %.1f<=%.1f) or strong volume (1.3x+)",

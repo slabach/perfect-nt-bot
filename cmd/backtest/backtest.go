@@ -41,6 +41,9 @@ type RealisticBacktestEngine struct {
 	currentBars  map[string]*feed.Bar // Ticker -> latest bar
 	previousBars map[string]*feed.Bar // Ticker -> previous bar for pattern detection
 
+	// Ticker cooldown tracking - prevent re-entering same ticker for 60 minutes after closing
+	tickerCooldowns map[string]time.Time // Ticker -> last close time
+
 	// Signal tracking (for stats)
 	signalsByTrade map[string]*strategy.EntrySignal // Key: ticker_entryTime, Value: signal
 
@@ -241,23 +244,24 @@ func NewRealisticBacktestEngine(
 	}
 
 	return &RealisticBacktestEngine{
-		cfg:            cfg,
-		scanner:        scanner,
-		riskPct:        riskPct,
-		evalMode:       evalMode,
-		location:       location,
-		buyingPower:    buyingPower,
-		riskLimits:     riskLimits,
-		strategyEngine: strategyEngine,
-		mlScorer:       mlScorer,
-		currentBars:    make(map[string]*feed.Bar),
-		previousBars:   make(map[string]*feed.Bar),
-		signalsByTrade: make(map[string]*strategy.EntrySignal),
-		trades:         make([]*strategy.TradeResult, 0),
-		accountBalance: cfg.AccountSize,
-		totalDays:      0,
-		runNumber:      1, // Default to 1 if not set
-		stats:          NewBacktestStats(),
+		cfg:             cfg,
+		scanner:         scanner,
+		riskPct:         riskPct,
+		evalMode:        evalMode,
+		location:        location,
+		buyingPower:     buyingPower,
+		riskLimits:      riskLimits,
+		strategyEngine:  strategyEngine,
+		mlScorer:        mlScorer,
+		currentBars:     make(map[string]*feed.Bar),
+		previousBars:    make(map[string]*feed.Bar),
+		tickerCooldowns: make(map[string]time.Time),
+		signalsByTrade:  make(map[string]*strategy.EntrySignal),
+		trades:          make([]*strategy.TradeResult, 0),
+		accountBalance:  cfg.AccountSize,
+		totalDays:       0,
+		runNumber:       1, // Default to 1 if not set
+		stats:           NewBacktestStats(),
 	}
 }
 
@@ -285,6 +289,10 @@ func (rbe *RealisticBacktestEngine) Run(barsByDate map[time.Time]map[string][]fe
 		rbe.riskLimits.ResetDailyPnL()
 		rbe.buyingPower.SetInRegularHours(true)
 
+		// Clear ticker cooldowns at start of each new day
+		// (cooldowns reset daily - no cross-day restrictions)
+		rbe.tickerCooldowns = make(map[string]time.Time)
+
 		// Configure adaptive thresholds based on config
 		rbe.strategyEngine.SetAdaptiveThresholdsEnabled(rbe.cfg.EnableAdaptiveThresholds)
 
@@ -299,7 +307,7 @@ func (rbe *RealisticBacktestEngine) Run(barsByDate map[time.Time]map[string][]fe
 			}
 			fmt.Printf("  Using confidence threshold: %.2f (ML: %v)\n",
 				effectiveThreshold, rbe.mlScorer != nil && rbe.mlScorer.IsEnabled())
-			fmt.Printf("  Trading window: 10:30 AM - 11:30 AM ET (includes best hour: 11:00 AM with 60%% win rate)\n")
+			fmt.Printf("  Trading window: 9:45 AM - 3:30 PM ET (widened to capture more volatility and opportunities)\n")
 		}
 
 		// Reset current bars for new day (keep previous day's last bar for continuity)
@@ -500,17 +508,20 @@ func (rbe *RealisticBacktestEngine) convertBar(fb feed.Bar) strategy.Bar {
 
 // checkEntries checks for entry signals and executes trades
 func (rbe *RealisticBacktestEngine) checkEntries(currentTime time.Time, eodTime time.Time, minuteBars []TickerBar) {
-	// TIME FILTER: Focus on best performing hours based on backtest results
-	// Stats show: 11:00 AM = 60% win rate (BEST), 9:00 AM = 20%, 10:00 AM = 16.7%
-	// Strategy: Trade in 10:00-11:30 AM window to include best hour while allowing some flexibility
+	// TIME FILTER: Widened trading window to capture more opportunities
+	// Mean reversion strategies need volatility to work; restricting to a single hour kills sample size
+	// Allow trading from 9:45 AM to 3:30 PM (15:30) to capture morning volatility and afternoon moves
 	hour := currentTime.Hour()
 	minute := currentTime.Minute()
 
-	// Allow entries during 10:00 AM - 11:30 AM ET
-	// This includes the best performing hour (11:00 AM with 60% win rate)
-	// But excludes worst hours (9:00 AM = 20%, 10:00 AM = 16.7% early in hour)
-	if hour < 10 || (hour == 10 && minute < 30) || hour > 11 || (hour == 11 && minute > 30) {
-		// Outside best trading window - skip entry checks
+	// Allow entries during 9:45 AM - 3:30 PM ET
+	// This captures:
+	// - Morning volatility (9:45-10:30) - often the most volatile period
+	// - Mid-day opportunities (10:30-14:00)
+	// - Afternoon moves (14:00-15:30) - before market close
+	// Excludes first 15 minutes after open (9:30-9:45) for market stabilization
+	if hour < 9 || (hour == 9 && minute < 45) || hour > 15 || (hour == 15 && minute > 30) {
+		// Outside trading window - skip entry checks
 		return
 	}
 
@@ -523,6 +534,21 @@ func (rbe *RealisticBacktestEngine) checkEntries(currentTime time.Time, eodTime 
 		// Skip if already in a position
 		if rbe.strategyEngine.HasPosition(ticker) {
 			continue
+		}
+
+		// Check ticker cooldown - prevent re-entering same ticker for 90 minutes after closing
+		// When a mean reversion trade works (hits target), the "reversion" has happened and edge is gone
+		// Re-entering immediately usually means fighting a new trend or chopping yourself up
+		// Extended to 90 minutes to prevent "shotgun" trading patterns
+		if lastCloseTime, inCooldown := rbe.tickerCooldowns[ticker]; inCooldown {
+			cooldownDuration := 90 * time.Minute // 90 minute cooldown (extended from 60)
+			timeSinceClose := currentTime.Sub(lastCloseTime)
+			if timeSinceClose < cooldownDuration {
+				// Still in cooldown period - skip this ticker
+				continue
+			}
+			// Cooldown expired - remove from map (optional, but keeps map clean)
+			delete(rbe.tickerCooldowns, ticker)
 		}
 
 		// Get current bar
@@ -603,11 +629,12 @@ func (rbe *RealisticBacktestEngine) checkEntries(currentTime time.Time, eodTime 
 	// Without ML: max possible score is ~80 (10% ML + 25% pattern + 30% VWAP + 20% RSI + 10% volume + 5% bonus)
 	// With ML: max possible score is ~100 (10% ML + 25% pattern + 30% VWAP + 20% RSI + 10% volume + 5% bonus)
 	if rbe.mlScorer == nil || !rbe.mlScorer.IsEnabled() {
-		// Without ML, max score is ~80, so use 50 (62.5% of max) for good selectivity
-		// This takes top ~40% of signals to balance quality and quantity
-		minConfidence = 50.0
-		if rbe.cfg.MinConfidenceThreshold < 50.0 && rbe.cfg.MinConfidenceThreshold > 0 {
-			// If user set a lower threshold, respect it
+		// Without ML, max score is ~80, so use 30 (37.5% of max) for more opportunities
+		// Reduced from 50 to 30 to allow more valid signals through the filter
+		// This balances quality and quantity - we need more trades to properly evaluate the strategy
+		minConfidence = 30.0
+		if rbe.cfg.MinConfidenceThreshold > 0 {
+			// If user set a threshold, respect it (allow lower than default)
 			minConfidence = rbe.cfg.MinConfidenceThreshold
 		}
 	} else {
@@ -1185,6 +1212,10 @@ func (rbe *RealisticBacktestEngine) executeExit(position *strategy.Position, exi
 
 	// Close position
 	rbe.strategyEngine.ClosePosition(position.Ticker)
+
+	// Record ticker cooldown - prevent re-entry for 90 minutes after closing
+	// This prevents "shotgun" trading where we immediately re-enter after hitting a target
+	rbe.tickerCooldowns[position.Ticker] = exitTime
 
 	fmt.Printf("  EXIT: %s %d shares @ $%.2f (%s) - Net P&L: $%.2f (Commission: $%.2f) [Fill: $%.2f]\n",
 		position.Ticker, shares, exitPrice, reason, trade.NetPnL, commission, fillPrice)
