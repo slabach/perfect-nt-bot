@@ -307,6 +307,35 @@ func (rbe *RealisticBacktestEngine) Run(barsByDate map[time.Time]map[string][]fe
 
 		fmt.Printf("\nDay %d/%d: %s\n", dayIdx+1, len(dates), date.Format("2006-01-02"))
 
+		// Step 4: Calculate and set previous day's high/close for trend filter
+		// Get previous day's data if available
+		if dayIdx > 0 {
+			prevDate := dates[dayIdx-1]
+			prevDayBars := barsByDate[prevDate]
+
+			// Calculate previous day's high and close for each ticker
+			for ticker, bars := range prevDayBars {
+				if len(bars) == 0 {
+					continue
+				}
+
+				// Find the highest high and last close of the previous day
+				prevDayHigh := 0.0
+				prevDayClose := bars[len(bars)-1].Close // Last bar's close
+
+				for _, bar := range bars {
+					if bar.High > prevDayHigh {
+						prevDayHigh = bar.High
+					}
+				}
+
+				// Set previous day data in strategy engine
+				if prevDayHigh > 0 && prevDayClose > 0 {
+					rbe.strategyEngine.SetPreviousDayData(ticker, prevDayHigh, prevDayClose)
+				}
+			}
+		}
+
 		// Process this day's bars
 		dayBars := barsByDate[date]
 

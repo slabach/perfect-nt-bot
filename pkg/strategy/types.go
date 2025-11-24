@@ -21,6 +21,9 @@ type IndicatorState struct {
 	RSI        float64
 	VolumeMA   float64 // 20-period volume moving average
 	LastUpdate time.Time
+	// Step 4: Trend filter - previous day's data to avoid shorting during breakouts
+	PreviousDayHigh  float64 // Previous day's high price (0 if not available)
+	PreviousDayClose float64 // Previous day's close price (0 if not available)
 }
 
 // DeathCandlePattern represents detected pattern types (both bearish and bullish reversal patterns)

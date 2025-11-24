@@ -8,10 +8,10 @@ import (
 
 // TradePerformance tracks performance of a single trade
 type TradePerformance struct {
-	Ticker     string
-	EntryTime  time.Time
-	NetPnL     float64
-	IsWin      bool
+	Ticker    string
+	EntryTime time.Time
+	NetPnL    float64
+	IsWin     bool
 }
 
 // PerformanceTracker tracks recent trade performance
@@ -23,29 +23,29 @@ type PerformanceTracker struct {
 // EntryChecker checks if entry conditions are met for a short trade
 type EntryChecker struct {
 	vwapExtensionThreshold float64 // ATR multiples (e.g., 1.5)
-	rsiThreshold          float64 // Overbought threshold (e.g., 65)
-	minVolumeMA           float64 // Minimum volume multiplier (e.g., 1.0 for 1x average)
-	target1Profit         float64 // First target profit per share (e.g., 0.15-0.20)
-	target2Profit         float64 // Second target profit per share (e.g., 0.25-0.30)
-	atrStopMultiplier    float64 // Stop loss ATR multiplier (e.g., 1.5)
+	rsiThreshold           float64 // Overbought threshold (e.g., 65)
+	minVolumeMA            float64 // Minimum volume multiplier (e.g., 1.0 for 1x average)
+	target1Profit          float64 // First target profit per share (e.g., 0.15-0.20)
+	target2Profit          float64 // Second target profit per share (e.g., 0.25-0.30)
+	atrStopMultiplier      float64 // Stop loss ATR multiplier (e.g., 1.5)
 	maxConcurrentPositions int
-	performanceTracker    *PerformanceTracker
+	performanceTracker     *PerformanceTracker
 	enableAdaptive         bool
 }
 
 // NewEntryChecker creates a new entry checker with default parameters
 func NewEntryChecker() *EntryChecker {
 	return &EntryChecker{
-		// BALANCED FIX: Tighter thresholds for better entry quality, but not so strict we get 0 trades
-		// Goal: Improve win rate from 26% to 35-40% by being more selective
-		vwapExtensionThreshold: 0.62, // Increased from 0.60 - require stronger extension (top 30% of setups)
-		rsiThreshold:          58.0,  // Increased from 57.0 - require more extreme overbought/oversold
-		minVolumeMA:           0.9,   // Increased from 0.85 - require volume near average (stronger confirmation)
-		target1Profit:         0.20,  // $0.20/share for first target (keep same)
-		target2Profit:         0.30,  // $0.30/share for second target (keep same)
-		atrStopMultiplier:    0.85,   // Back to 0.85x ATR - 0.80x was too tight, causing premature stops
-		maxConcurrentPositions: 3,   // Keep at 3 - allow some diversification
-		performanceTracker:    NewPerformanceTracker(),
+		// Step 3: Loosened thresholds to get more trades (3-5 per day target)
+		// Reduced from 0.62 to 0.45 to increase trade frequency
+		vwapExtensionThreshold: 0.45, // Reduced from 0.62 - need more volume to hit 6% profit
+		rsiThreshold:           58.0, // Keep same - require more extreme overbought/oversold
+		minVolumeMA:            0.9,  // Keep same - require volume near average (stronger confirmation)
+		target1Profit:          0.15, // $0.20/share for first target (keep same)
+		target2Profit:          0.30, // $0.30/share for second target (keep same)
+		atrStopMultiplier:      0.85, // Back to 0.85x ATR - 0.80x was too tight, causing premature stops
+		maxConcurrentPositions: 3,    // Keep at 3 - allow some diversification
+		performanceTracker:     NewPerformanceTracker(),
 		enableAdaptive:         true, // Enable adaptive thresholds by default
 	}
 }
@@ -66,9 +66,9 @@ func (pt *PerformanceTracker) RecordTrade(ticker string, entryTime time.Time, ne
 		NetPnL:    netPnL,
 		IsWin:     netPnL > 0,
 	}
-	
+
 	pt.recentTrades = append(pt.recentTrades, trade)
-	
+
 	// Keep only last maxTrades
 	if len(pt.recentTrades) > pt.maxTrades {
 		pt.recentTrades = pt.recentTrades[len(pt.recentTrades)-pt.maxTrades:]
@@ -80,29 +80,29 @@ func (pt *PerformanceTracker) GetRecentWinRate(n int) float64 {
 	if n <= 0 {
 		n = 5 // Default to last 5 trades
 	}
-	
+
 	if len(pt.recentTrades) == 0 {
 		return 0.5 // Default 50% if no trades
 	}
-	
+
 	// Get last N trades
 	startIdx := len(pt.recentTrades) - n
 	if startIdx < 0 {
 		startIdx = 0
 	}
-	
+
 	recent := pt.recentTrades[startIdx:]
 	if len(recent) == 0 {
 		return 0.5
 	}
-	
+
 	wins := 0
 	for _, trade := range recent {
 		if trade.IsWin {
 			wins++
 		}
 	}
-	
+
 	return float64(wins) / float64(len(recent))
 }
 
@@ -115,13 +115,13 @@ func (pt *PerformanceTracker) Reset() {
 func (ec *EntryChecker) GetAdaptiveThresholds() (vwapThreshold, rsiThreshold float64) {
 	baseVWAP := 0.55
 	baseRSI := 55.0
-	
+
 	if !ec.enableAdaptive || ec.performanceTracker == nil {
 		return baseVWAP, baseRSI
 	}
-	
+
 	recentWinRate := ec.performanceTracker.GetRecentWinRate(5)
-	
+
 	if recentWinRate < 0.3 {
 		// Poor performance: tighten thresholds
 		return baseVWAP + 0.05, baseRSI + 3.0
@@ -129,7 +129,7 @@ func (ec *EntryChecker) GetAdaptiveThresholds() (vwapThreshold, rsiThreshold flo
 		// Good performance: slightly relax thresholds
 		return baseVWAP - 0.02, baseRSI - 1.0
 	}
-	
+
 	// Default: use base thresholds
 	return baseVWAP, baseRSI
 }
@@ -171,12 +171,12 @@ func (ec *EntryChecker) CheckEntryConditions(
 	// Still avoid entries too late in the day to prevent EOD losses
 	entryHour := bar.Time.Hour()
 	entryMinute := bar.Time.Minute()
-	
+
 	// Avoid entries after 3:00 PM (15:00) - extended from 2:45 PM
 	if entryHour > 15 || (entryHour == 15 && entryMinute >= 0) {
 		return nil, fmt.Errorf("entry too late in day (hour: %d:%02d, need: < 15:00)", entryHour, entryMinute)
 	}
-	
+
 	// Avoid entries in first 15 minutes of market open (9:30-9:45 AM)
 	// Market opens at 9:30 AM - allow entries starting at 9:45 AM
 	// 10:00 AM entries are the best performing (avg +$58.56)
@@ -214,20 +214,34 @@ func (ec *EntryChecker) CheckEntryConditions(
 
 	// Check VWAP extension: price must be extended above VWAP
 	vwapExtension := GetVWAPExtension(currentPrice, indicators.VWAP, indicators.ATR)
+
+	// Step 4: Trend filter - avoid shorting during massive breakouts
+	// If current price > previous day high, be very careful about shorting
+	// This prevents mean reversion bot from getting run over by trends
+	if indicators.PreviousDayHigh > 0 && currentPrice > indicators.PreviousDayHigh {
+		// Price is breaking out above previous day high - require stronger VWAP extension to compensate for trend risk
+		trendRiskThreshold := vwapThreshold + 0.15 // Require 0.15 ATR more extension
+		if vwapExtension < trendRiskThreshold {
+			return nil, fmt.Errorf("price breaking out above previous day high (%.2f > %.2f) - requires stronger extension (%.2f ATR, need: %.2f)",
+				currentPrice, indicators.PreviousDayHigh, vwapExtension, trendRiskThreshold)
+		}
+	}
+
+	// Check base VWAP extension threshold
 	if vwapExtension < vwapThreshold {
-		return nil, fmt.Errorf("price not extended above VWAP (extension: %.2f ATR, need: %.2f)", 
+		return nil, fmt.Errorf("price not extended above VWAP (extension: %.2f ATR, need: %.2f)",
 			vwapExtension, vwapThreshold)
 	}
 
 	// Check RSI: must be overbought
 	if indicators.RSI < rsiThreshold {
-		return nil, fmt.Errorf("RSI not overbought (RSI: %.2f, need: >%.2f)", 
+		return nil, fmt.Errorf("RSI not overbought (RSI: %.2f, need: >%.2f)",
 			indicators.RSI, rsiThreshold)
 	}
 
 	// Check volume: must be above average
 	if indicators.VolumeMA == 0 || float64(bar.Volume) < (indicators.VolumeMA*ec.minVolumeMA) {
-		return nil, fmt.Errorf("volume too low (volume: %d, need: >%.0f)", 
+		return nil, fmt.Errorf("volume too low (volume: %d, need: >%.0f)",
 			bar.Volume, indicators.VolumeMA*ec.minVolumeMA)
 	}
 
@@ -242,7 +256,7 @@ func (ec *EntryChecker) CheckEntryConditions(
 	if pattern == NoPattern {
 		patternConfidence = 0.3
 	}
-	
+
 	// Priority 3 Fix: Momentum filter - price should be moving away from VWAP
 	// For short entries, we want to see price moving up (away from VWAP)
 	// This will be properly checked in CheckEntryConditionsWithPrevious with previous bar
@@ -279,7 +293,7 @@ func (ec *EntryChecker) CheckEntryConditions(
 		RSI:           indicators.RSI,
 		Volume:        bar.Volume,
 		Timestamp:     bar.Time,
-		Reason:        fmt.Sprintf("Short entry: VWAP extension %.2fx ATR, RSI %.1f, pattern %v", 
+		Reason: fmt.Sprintf("Short entry: VWAP extension %.2fx ATR, RSI %.1f, pattern %v",
 			vwapExtension, indicators.RSI, pattern),
 	}
 
@@ -296,7 +310,7 @@ func (ec *EntryChecker) CheckEntryConditionsWithPrevious(
 ) (*EntrySignal, error) {
 	currentPrice := currentBar.Close
 	pattern := DetectDeathCandlePattern(currentBar, previousBar)
-	
+
 	// Priority 3 Fix: Momentum filter - require price moving away from VWAP
 	// For short entries, we want to see price moving up (current > previous close)
 	// This indicates momentum away from VWAP, making it more likely to hit Target 1
@@ -310,17 +324,17 @@ func (ec *EntryChecker) CheckEntryConditionsWithPrevious(
 			return nil, fmt.Errorf("price moving back toward VWAP (price change: %.4f, need: >= -0.08 for short entry)", priceMomentum)
 		}
 	}
-	
+
 	// Phase 2 Fix #4: Prefer death candle pattern but allow strong setups without pattern
 	// Pattern requirement was too strict - making it optional but preferred
 	// Entries without pattern need stronger VWAP extension and RSI to compensate, OR strong volume
 	if pattern == NoPattern {
 		vwapExtension := GetVWAPExtension(currentPrice, indicators.VWAP, indicators.ATR)
-		
+
 		// BALANCED FIX: Require stronger setups for entries without patterns, but not too strict
 		// Check if volume is strong (above 1.3x average) - stricter threshold
 		strongVolume := indicators.VolumeMA > 0 && float64(currentBar.Volume) > indicators.VolumeMA*1.3
-		
+
 		// If volume is strong, allow entry with normal thresholds
 		if strongVolume {
 			// Strong volume compensates for no pattern - use normal thresholds
@@ -330,22 +344,22 @@ func (ec *EntryChecker) CheckEntryConditionsWithPrevious(
 			// These thresholds are higher than the base thresholds (0.62, 58.0)
 			requiredExtension := 0.70 // Higher than base 0.62x - require stronger extensions
 			requiredRSI := 62.0       // Higher than base 58.0 - require more extreme overbought/oversold
-			
+
 			if vwapExtension < requiredExtension || indicators.RSI < requiredRSI {
-				return nil, fmt.Errorf("no death candle pattern detected - requires stronger setup (VWAP: %.2f>=%.2f ATR, RSI: %.1f>=%.1f) or strong volume (1.3x+)", 
+				return nil, fmt.Errorf("no death candle pattern detected - requires stronger setup (VWAP: %.2f>=%.2f ATR, RSI: %.1f>=%.1f) or strong volume (1.3x+)",
 					vwapExtension, requiredExtension, indicators.RSI, requiredRSI)
 			}
 		}
 		// Strong setup without pattern - allow entry but with lower confidence
 	}
-	
+
 	// Update indicators with pattern confidence calculation
 	vwapExtension := GetVWAPExtension(currentPrice, indicators.VWAP, indicators.ATR)
 	patternConfidence := PatternConfidence(pattern, currentBar, vwapExtension)
 
 	// Create temporary indicator state with pattern info
 	tempIndicators := *indicators
-	
+
 	// Call base check
 	signal, err := ec.CheckEntryConditions(
 		ticker,
@@ -355,15 +369,15 @@ func (ec *EntryChecker) CheckEntryConditionsWithPrevious(
 		openPositions,
 		eodTime,
 	)
-	
+
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Update with pattern from previous bar check
 	signal.Pattern = pattern
 	signal.Confidence = patternConfidence
-	
+
 	return signal, nil
 }
 
@@ -384,12 +398,12 @@ func (ec *EntryChecker) CheckLongEntryConditions(
 	// Same entry window restrictions as shorts
 	entryHour := bar.Time.Hour()
 	entryMinute := bar.Time.Minute()
-	
+
 	// Avoid entries after 3:00 PM (15:00)
 	if entryHour > 15 || (entryHour == 15 && entryMinute >= 0) {
 		return nil, fmt.Errorf("entry too late in day (hour: %d:%02d, need: < 15:00)", entryHour, entryMinute)
 	}
-	
+
 	// Avoid entries in first 15 minutes of market open (9:30-9:45 AM)
 	if entryHour == 9 && entryMinute >= 30 && entryMinute < 45 {
 		return nil, fmt.Errorf("entry too early in day (hour: %d:%02d, need: >= 9:45)", entryHour, entryMinute)
@@ -427,20 +441,20 @@ func (ec *EntryChecker) CheckLongEntryConditions(
 	// For longs, we need negative extension (price below VWAP)
 	// Check if extension is <= -threshold (extended below by at least threshold)
 	if vwapExtension > -vwapThreshold {
-		return nil, fmt.Errorf("price not extended below VWAP (extension: %.2f ATR, need: <= %.2f)", 
+		return nil, fmt.Errorf("price not extended below VWAP (extension: %.2f ATR, need: <= %.2f)",
 			vwapExtension, -vwapThreshold)
 	}
 
 	// Check RSI: must be oversold (symmetric to overbought threshold)
 	longRSIThreshold := 100.0 - rsiThreshold
 	if indicators.RSI > longRSIThreshold {
-		return nil, fmt.Errorf("RSI not oversold (RSI: %.2f, need: <%.2f)", 
+		return nil, fmt.Errorf("RSI not oversold (RSI: %.2f, need: <%.2f)",
 			indicators.RSI, longRSIThreshold)
 	}
 
 	// Check volume: must be above average (same as shorts)
 	if indicators.VolumeMA == 0 || float64(bar.Volume) < (indicators.VolumeMA*ec.minVolumeMA) {
-		return nil, fmt.Errorf("volume too low (volume: %d, need: >%.0f)", 
+		return nil, fmt.Errorf("volume too low (volume: %d, need: >%.0f)",
 			bar.Volume, indicators.VolumeMA*ec.minVolumeMA)
 	}
 
@@ -456,7 +470,7 @@ func (ec *EntryChecker) CheckLongEntryConditions(
 	if pattern == NoPattern {
 		patternConfidence = 0.3
 	}
-	
+
 	// Momentum filter - price should be moving away from VWAP
 	// For long entries, we want to see price moving down (away from VWAP)
 	// This will be properly checked in CheckLongEntryConditionsWithPrevious with previous bar
@@ -493,7 +507,7 @@ func (ec *EntryChecker) CheckLongEntryConditions(
 		RSI:           indicators.RSI,
 		Volume:        bar.Volume,
 		Timestamp:     bar.Time,
-		Reason:        fmt.Sprintf("Long entry: VWAP extension %.2fx ATR, RSI %.1f, pattern %v", 
+		Reason: fmt.Sprintf("Long entry: VWAP extension %.2fx ATR, RSI %.1f, pattern %v",
 			vwapExtension, indicators.RSI, pattern),
 	}
 
@@ -510,7 +524,7 @@ func (ec *EntryChecker) CheckLongEntryConditionsWithPrevious(
 ) (*EntrySignal, error) {
 	currentPrice := currentBar.Close
 	pattern := DetectBullishReversalPattern(currentBar, previousBar)
-	
+
 	// Momentum filter - require price moving away from VWAP
 	// For long entries, we want to see price moving down (current < previous close)
 	// This indicates momentum away from VWAP, making it more likely to hit Target 1
@@ -524,17 +538,17 @@ func (ec *EntryChecker) CheckLongEntryConditionsWithPrevious(
 			return nil, fmt.Errorf("price moving back toward VWAP (price change: %.4f, need: <= 0.08 for long entry)", priceMomentum)
 		}
 	}
-	
+
 	// Prefer bullish reversal pattern but allow strong setups without pattern
 	// Pattern requirement was too strict - making it optional but preferred
 	// Entries without pattern need stronger VWAP extension and RSI to compensate, OR strong volume
 	if pattern == NoPattern {
 		vwapExtension := GetVWAPExtension(currentPrice, indicators.VWAP, indicators.ATR)
-		
+
 		// BALANCED FIX: Require stronger setups for entries without patterns, but not too strict
 		// Check if volume is strong (above 1.3x average) - stricter threshold
 		strongVolume := indicators.VolumeMA > 0 && float64(currentBar.Volume) > indicators.VolumeMA*1.3
-		
+
 		// If volume is strong, allow entry with normal thresholds
 		if strongVolume {
 			// Strong volume compensates for no pattern - use normal thresholds
@@ -544,15 +558,15 @@ func (ec *EntryChecker) CheckLongEntryConditionsWithPrevious(
 			// For longs, we need more negative extension (further below VWAP)
 			requiredExtension := -0.70 // More negative than base -0.62x - require stronger extensions
 			longRSIThreshold := 38.0   // More oversold than base 42.0 (100 - 58 = 42) - require more extreme oversold
-			
+
 			if vwapExtension > requiredExtension || indicators.RSI > longRSIThreshold {
-				return nil, fmt.Errorf("no bullish reversal pattern detected - requires stronger setup (VWAP: %.2f<=%.2f ATR, RSI: %.1f<=%.1f) or strong volume (1.3x+)", 
+				return nil, fmt.Errorf("no bullish reversal pattern detected - requires stronger setup (VWAP: %.2f<=%.2f ATR, RSI: %.1f<=%.1f) or strong volume (1.3x+)",
 					vwapExtension, requiredExtension, indicators.RSI, longRSIThreshold)
 			}
 		}
 		// Strong setup without pattern - allow entry but with lower confidence
 	}
-	
+
 	// Update indicators with pattern confidence calculation
 	vwapExtension := GetVWAPExtension(currentPrice, indicators.VWAP, indicators.ATR)
 	// Use absolute value for confidence calculation
@@ -561,7 +575,7 @@ func (ec *EntryChecker) CheckLongEntryConditionsWithPrevious(
 
 	// Create temporary indicator state with pattern info
 	tempIndicators := *indicators
-	
+
 	// Call base check
 	signal, err := ec.CheckLongEntryConditions(
 		ticker,
@@ -571,15 +585,15 @@ func (ec *EntryChecker) CheckLongEntryConditionsWithPrevious(
 		openPositions,
 		eodTime,
 	)
-	
+
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Update with pattern from previous bar check
 	signal.Pattern = pattern
 	signal.Confidence = patternConfidence
-	
+
 	return signal, nil
 }
 

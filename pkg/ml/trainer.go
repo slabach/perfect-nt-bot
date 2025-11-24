@@ -141,6 +141,60 @@ func TrainOnHistoricalData(
 		wins, float64(wins)/float64(len(trainingExamples))*100,
 		len(trainingExamples)-wins, float64(len(trainingExamples)-wins)/float64(len(trainingExamples))*100)
 
+	// Step 2: Fix class imbalance - balance wins and losses
+	// Separate wins and losses
+	var winExamples, lossExamples []TrainingExample
+	for _, ex := range trainingExamples {
+		if ex.Label > 0.5 {
+			winExamples = append(winExamples, ex)
+		} else {
+			lossExamples = append(lossExamples, ex)
+		}
+	}
+
+	fmt.Printf("  Before balancing: Wins: %d, Losses: %d\n", len(winExamples), len(lossExamples))
+
+	// Duplicate wins to match losses (or vice versa if losses are fewer)
+	balancedExamples := make([]TrainingExample, 0)
+	if len(winExamples) < len(lossExamples) {
+		// Duplicate wins to match losses
+		duplicatedWins := make([]TrainingExample, len(winExamples))
+		copy(duplicatedWins, winExamples)
+		for len(duplicatedWins) < len(lossExamples) {
+			// Duplicate by appending the original wins
+			duplicatedWins = append(duplicatedWins, winExamples...)
+		}
+		// Truncate if we overshot
+		if len(duplicatedWins) > len(lossExamples) {
+			duplicatedWins = duplicatedWins[:len(lossExamples)]
+		}
+		balancedExamples = append(duplicatedWins, lossExamples...)
+		fmt.Printf("  After balancing: Duplicated wins to match losses. Total: %d (Wins: %d, Losses: %d)\n",
+			len(balancedExamples), len(duplicatedWins), len(lossExamples))
+	} else if len(lossExamples) < len(winExamples) {
+		// Duplicate losses to match wins
+		duplicatedLosses := make([]TrainingExample, len(lossExamples))
+		copy(duplicatedLosses, lossExamples)
+		for len(duplicatedLosses) < len(winExamples) {
+			// Duplicate by appending the original losses
+			duplicatedLosses = append(duplicatedLosses, lossExamples...)
+		}
+		// Truncate if we overshot
+		if len(duplicatedLosses) > len(winExamples) {
+			duplicatedLosses = duplicatedLosses[:len(winExamples)]
+		}
+		balancedExamples = append(winExamples, duplicatedLosses...)
+		fmt.Printf("  After balancing: Duplicated losses to match wins. Total: %d (Wins: %d, Losses: %d)\n",
+			len(balancedExamples), len(winExamples), len(duplicatedLosses))
+	} else {
+		// Already balanced
+		balancedExamples = trainingExamples
+		fmt.Printf("  Already balanced: %d examples\n", len(balancedExamples))
+	}
+
+	// Use balanced examples for training
+	trainingExamples = balancedExamples
+
 	// Prepare training data
 	X := make([][]float64, len(trainingExamples))
 	y := make([]float64, len(trainingExamples))

@@ -52,9 +52,20 @@ func (se *StrategyEngine) ResetDailyState(marketOpen time.Time) {
 		se.entryChecker.ResetDaily()
 	}
 	
-	// Reset per-ticker indicators
+	// Reset per-ticker indicators (preserve previous day data)
 	for ticker := range se.tickerStates {
-		se.tickerStates[ticker] = &IndicatorState{}
+		existingState := se.tickerStates[ticker]
+		prevDayHigh := 0.0
+		prevDayClose := 0.0
+		if existingState != nil {
+			prevDayHigh = existingState.PreviousDayHigh
+			prevDayClose = existingState.PreviousDayClose
+		}
+		
+		se.tickerStates[ticker] = &IndicatorState{
+			PreviousDayHigh:  prevDayHigh,
+			PreviousDayClose: prevDayClose,
+		}
 		
 		// Reset calculators for this ticker
 		if vwap, exists := se.tickerVWAPs[ticker]; exists {
@@ -125,13 +136,23 @@ func (se *StrategyEngine) UpdateTicker(ticker string, bar Bar) {
 	}
 	volumeMA := float64(volumeSum) / float64(len(se.tickerBars[ticker]))
 
-	// Update ticker state
+	// Update ticker state (preserve previous day data if it exists)
+	existingState, exists := se.tickerStates[ticker]
+	prevDayHigh := 0.0
+	prevDayClose := 0.0
+	if exists {
+		prevDayHigh = existingState.PreviousDayHigh
+		prevDayClose = existingState.PreviousDayClose
+	}
+	
 	se.tickerStates[ticker] = &IndicatorState{
-		VWAP:      vwap.GetVWAP(),
-		ATR:       atr.GetATR(),
-		RSI:       rsi.GetRSI(),
-		VolumeMA:  volumeMA,
-		LastUpdate: bar.Time,
+		VWAP:           vwap.GetVWAP(),
+		ATR:            atr.GetATR(),
+		RSI:            rsi.GetRSI(),
+		VolumeMA:       volumeMA,
+		LastUpdate:     bar.Time,
+		PreviousDayHigh:  prevDayHigh,
+		PreviousDayClose: prevDayClose,
 	}
 }
 
@@ -322,4 +343,21 @@ func (se *StrategyEngine) CloseAllPositions() []*Position {
 // GetMaxConcurrentPositions returns the maximum concurrent positions allowed
 func (se *StrategyEngine) GetMaxConcurrentPositions() int {
 	return se.entryChecker.GetMaxConcurrentPositions()
+}
+
+// SetPreviousDayData sets the previous day's high and close for a ticker
+// This is used for trend filtering to avoid shorting during breakouts
+func (se *StrategyEngine) SetPreviousDayData(ticker string, prevDayHigh, prevDayClose float64) {
+	state, exists := se.tickerStates[ticker]
+	if !exists {
+		// Create new state if it doesn't exist
+		se.tickerStates[ticker] = &IndicatorState{
+			PreviousDayHigh:  prevDayHigh,
+			PreviousDayClose: prevDayClose,
+		}
+	} else {
+		// Update existing state
+		state.PreviousDayHigh = prevDayHigh
+		state.PreviousDayClose = prevDayClose
+	}
 }
