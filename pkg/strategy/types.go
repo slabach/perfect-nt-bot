@@ -51,6 +51,7 @@ type EntrySignal struct {
 	Volume              int64
 	Timestamp           time.Time
 	Reason              string // Human-readable reason for entry
+	MLScore             float64 // ML model prediction (0-1 probability of hitting Target 1)
 }
 
 // Position represents an open trading position

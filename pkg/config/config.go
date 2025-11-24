@@ -13,19 +13,25 @@ import (
 // Config holds all configuration values
 type Config struct {
 	// API Keys
-	PolygonAPIKey        string
+	PolygonAPIKey         string
 	SignalStackWebhookURL string
 
 	// Account Configuration
-	AccountSize        float64
-	MaxDailyLoss      float64
-	MaxDailyLossPct   float64
-	HardStopLoss      float64
-	HardStopLossPct   float64
+	AccountSize     float64
+	MaxDailyLoss    float64
+	MaxDailyLossPct float64
+	HardStopLoss    float64
+	HardStopLossPct float64
 
 	// Trading Configuration
 	BacktestTickers []string
 	Blacklist       []string
+
+	// ML and Filtering Configuration
+	MLModelPath              string  // Path to ML model file
+	MinConfidenceThreshold   float64 // Minimum confidence score (0-100, default: 60.0)
+	EnableCorrelationFilter  bool    // Enable correlation filtering
+	EnableAdaptiveThresholds bool    // Enable adaptive threshold adjustment
 
 	// Risk Limits (calculated)
 	MaxDailyLossLimit float64 // Capped at 1% of account
@@ -134,6 +140,24 @@ func Load() (*Config, error) {
 	if blacklistStr != "" {
 		cfg.Blacklist = parseCommaList(blacklistStr)
 	}
+
+	// Load ML and filtering configuration
+	// Default to empty (disabled) - ML model is not reliable enough yet
+	// Set ML_MODEL_PATH environment variable to enable ML
+	cfg.MLModelPath = getEnv("ML_MODEL_PATH", "")
+
+	minConfidenceStr := getEnv("MIN_CONFIDENCE_THRESHOLD", "60.0")
+	minConfidence, err := strconv.ParseFloat(minConfidenceStr, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid MIN_CONFIDENCE_THRESHOLD: %v", err)
+	}
+	cfg.MinConfidenceThreshold = minConfidence
+
+	correlationFilterStr := getEnv("ENABLE_CORRELATION_FILTER", "true")
+	cfg.EnableCorrelationFilter = correlationFilterStr == "true" || correlationFilterStr == "1"
+
+	adaptiveThresholdsStr := getEnv("ENABLE_ADAPTIVE_THRESHOLDS", "true")
+	cfg.EnableAdaptiveThresholds = adaptiveThresholdsStr == "true" || adaptiveThresholdsStr == "1"
 
 	return cfg, nil
 }

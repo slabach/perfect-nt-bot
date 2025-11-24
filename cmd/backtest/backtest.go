@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/perfect-nt-bot/pkg/config"
 	"github.com/perfect-nt-bot/pkg/feed"
+	"github.com/perfect-nt-bot/pkg/ml"
 	"github.com/perfect-nt-bot/pkg/risk"
 	"github.com/perfect-nt-bot/pkg/scanner"
 	"github.com/perfect-nt-bot/pkg/strategy"
@@ -32,15 +34,171 @@ type RealisticBacktestEngine struct {
 	// Strategy
 	strategyEngine *strategy.StrategyEngine
 
+	// ML scorer (optional)
+	mlScorer *ml.Scorer
+
 	// Current bar tracking per ticker
 	currentBars  map[string]*feed.Bar // Ticker -> latest bar
 	previousBars map[string]*feed.Bar // Ticker -> previous bar for pattern detection
 
+	// Signal tracking (for stats)
+	signalsByTrade map[string]*strategy.EntrySignal // Key: ticker_entryTime, Value: signal
+
 	// Results
 	trades         []*strategy.TradeResult
 	accountBalance float64
-	totalDays      int // Track total days processed for CSV filename
-	runNumber      int // Track which run this is (for multiple simultaneous backtests)
+	totalDays      int            // Track total days processed for CSV filename
+	runNumber      int            // Track which run this is (for multiple simultaneous backtests)
+	stats          *BacktestStats // Statistics tracking
+}
+
+// BacktestStats tracks detailed statistics for analysis
+type BacktestStats struct {
+	// Win rate by entry time (hour buckets: 9, 10, 11, 12, 13, 14, 15)
+	WinRateByHour map[int]struct {
+		Wins   int
+		Losses int
+		Total  int
+	}
+
+	// Win rate by VWAP extension level (buckets: 0.4-0.5, 0.5-0.6, 0.6+)
+	WinRateByVWAP map[string]struct {
+		Wins   int
+		Losses int
+		Total  int
+	}
+
+	// Win rate by RSI level (buckets: 52-55, 55-60, 60+)
+	WinRateByRSI map[string]struct {
+		Wins   int
+		Losses int
+		Total  int
+	}
+
+	// Win rate by pattern type
+	WinRateByPattern map[strategy.DeathCandlePattern]struct {
+		Wins   int
+		Losses int
+		Total  int
+	}
+
+	// Average win vs average loss
+	AverageWin  float64
+	AverageLoss float64
+	TotalWins   int
+	TotalLosses int
+
+	// Win rate by ML score (if ML enabled, buckets: 0-0.5, 0.5-0.7, 0.7+)
+	WinRateByMLScore map[string]struct {
+		Wins   int
+		Losses int
+		Total  int
+	}
+}
+
+// NewBacktestStats creates a new stats tracker
+func NewBacktestStats() *BacktestStats {
+	return &BacktestStats{
+		WinRateByHour:    make(map[int]struct{ Wins, Losses, Total int }),
+		WinRateByVWAP:    make(map[string]struct{ Wins, Losses, Total int }),
+		WinRateByRSI:     make(map[string]struct{ Wins, Losses, Total int }),
+		WinRateByPattern: make(map[strategy.DeathCandlePattern]struct{ Wins, Losses, Total int }),
+		WinRateByMLScore: make(map[string]struct{ Wins, Losses, Total int }),
+	}
+}
+
+// RecordTrade records a trade for statistics
+func (bs *BacktestStats) RecordTrade(trade *strategy.TradeResult, signal *strategy.EntrySignal) {
+	isWin := trade.NetPnL > 0
+
+	// Record by entry hour
+	hour := trade.EntryTime.Hour()
+	hourStat := bs.WinRateByHour[hour]
+	hourStat.Total++
+	if isWin {
+		hourStat.Wins++
+		bs.TotalWins++
+		bs.AverageWin = (bs.AverageWin*float64(bs.TotalWins-1) + trade.NetPnL) / float64(bs.TotalWins)
+	} else {
+		hourStat.Losses++
+		bs.TotalLosses++
+		bs.AverageLoss = (bs.AverageLoss*float64(bs.TotalLosses-1) + math.Abs(trade.NetPnL)) / float64(bs.TotalLosses)
+	}
+	bs.WinRateByHour[hour] = hourStat
+
+	// Record by VWAP extension (if signal available)
+	if signal != nil {
+		absExt := math.Abs(signal.VWAPExtension)
+		var vwapBucket string
+		if absExt < 0.5 {
+			vwapBucket = "0.4-0.5"
+		} else if absExt < 0.6 {
+			vwapBucket = "0.5-0.6"
+		} else {
+			vwapBucket = "0.6+"
+		}
+		vwapStat := bs.WinRateByVWAP[vwapBucket]
+		vwapStat.Total++
+		if isWin {
+			vwapStat.Wins++
+		} else {
+			vwapStat.Losses++
+		}
+		bs.WinRateByVWAP[vwapBucket] = vwapStat
+
+		// Record by RSI
+		var rsiBucket string
+		if signal.RSI < 55 {
+			rsiBucket = "52-55"
+		} else if signal.RSI < 60 {
+			rsiBucket = "55-60"
+		} else {
+			rsiBucket = "60+"
+		}
+		rsiStat := bs.WinRateByRSI[rsiBucket]
+		rsiStat.Total++
+		if isWin {
+			rsiStat.Wins++
+		} else {
+			rsiStat.Losses++
+		}
+		bs.WinRateByRSI[rsiBucket] = rsiStat
+
+		// Record by pattern
+		patternStat := bs.WinRateByPattern[signal.Pattern]
+		patternStat.Total++
+		if isWin {
+			patternStat.Wins++
+		} else {
+			patternStat.Losses++
+		}
+		bs.WinRateByPattern[signal.Pattern] = patternStat
+
+		// Record by ML score
+		// MLScore can be:
+		// - -1.0: ML not enabled/not calculated
+		// - 0.0-1.0: ML prediction (probability of hitting Target 1)
+		if signal.MLScore >= 0 {
+			// ML was enabled and score was calculated
+			var mlBucket string
+			if signal.MLScore < 0.5 {
+				mlBucket = "0-0.5"
+			} else if signal.MLScore < 0.7 {
+				mlBucket = "0.5-0.7"
+			} else {
+				mlBucket = "0.7+"
+			}
+			mlStat := bs.WinRateByMLScore[mlBucket]
+			mlStat.Total++
+			if isWin {
+				mlStat.Wins++
+			} else {
+				mlStat.Losses++
+			}
+			bs.WinRateByMLScore[mlBucket] = mlStat
+		}
+		// If MLScore < 0, ML was not enabled, so we don't record it
+	}
 }
 
 // NewRealisticBacktestEngine creates a new backtest engine
@@ -66,6 +224,22 @@ func NewRealisticBacktestEngine(
 
 	strategyEngine := strategy.NewStrategyEngine(location, marketOpen)
 
+	// Initialize ML scorer if model path is provided
+	var mlScorer *ml.Scorer
+	if cfg.MLModelPath != "" {
+		scorer, err := ml.NewScorer(cfg.MLModelPath)
+		if err != nil {
+			fmt.Printf("Warning: Failed to load ML scorer: %v (continuing without ML)\n", err)
+		} else {
+			mlScorer = scorer
+			if mlScorer.IsEnabled() {
+				fmt.Printf("ML scorer enabled with model: %s\n", cfg.MLModelPath)
+				// Set ML scorer in scanner
+				scanner.SetMLScorer(mlScorer)
+			}
+		}
+	}
+
 	return &RealisticBacktestEngine{
 		cfg:            cfg,
 		scanner:        scanner,
@@ -75,12 +249,15 @@ func NewRealisticBacktestEngine(
 		buyingPower:    buyingPower,
 		riskLimits:     riskLimits,
 		strategyEngine: strategyEngine,
+		mlScorer:       mlScorer,
 		currentBars:    make(map[string]*feed.Bar),
 		previousBars:   make(map[string]*feed.Bar),
+		signalsByTrade: make(map[string]*strategy.EntrySignal),
 		trades:         make([]*strategy.TradeResult, 0),
 		accountBalance: cfg.AccountSize,
 		totalDays:      0,
 		runNumber:      1, // Default to 1 if not set
+		stats:          NewBacktestStats(),
 	}
 }
 
@@ -108,6 +285,23 @@ func (rbe *RealisticBacktestEngine) Run(barsByDate map[time.Time]map[string][]fe
 		rbe.riskLimits.ResetDailyPnL()
 		rbe.buyingPower.SetInRegularHours(true)
 
+		// Configure adaptive thresholds based on config
+		rbe.strategyEngine.SetAdaptiveThresholdsEnabled(rbe.cfg.EnableAdaptiveThresholds)
+
+		// Log the confidence threshold being used (only on first day)
+		if dayIdx == 0 {
+			effectiveThreshold := rbe.cfg.MinConfidenceThreshold
+			if rbe.mlScorer == nil || !rbe.mlScorer.IsEnabled() {
+				effectiveThreshold = 50.0
+				if rbe.cfg.MinConfidenceThreshold < 50.0 && rbe.cfg.MinConfidenceThreshold > 0 {
+					effectiveThreshold = rbe.cfg.MinConfidenceThreshold
+				}
+			}
+			fmt.Printf("  Using confidence threshold: %.2f (ML: %v)\n",
+				effectiveThreshold, rbe.mlScorer != nil && rbe.mlScorer.IsEnabled())
+			fmt.Printf("  Trading window: 10:30 AM - 11:30 AM ET (includes best hour: 11:00 AM with 60%% win rate)\n")
+		}
+
 		// Reset current bars for new day (keep previous day's last bar for continuity)
 		// We'll update them as we process bars
 
@@ -129,11 +323,12 @@ func (rbe *RealisticBacktestEngine) Run(barsByDate map[time.Time]map[string][]fe
 		// Process minute-by-minute across all tickers
 		allMinuteBars := rbe.organizeByMinute(dayBars, date)
 
-		for _, minuteBars := range allMinuteBars {
-			if len(minuteBars) == 0 {
+		for _, minuteData := range allMinuteBars {
+			if len(minuteData.Bars) == 0 {
 				continue
 			}
-			minuteTime := minuteBars[0].Bar.Time
+			minuteTime := minuteData.MinuteTime
+			minuteBars := minuteData.Bars
 
 			// Check if we've reached EOD (3:50 PM) - close all positions
 			if minuteTime.After(eodTime) || minuteTime.Equal(eodTime) {
@@ -201,6 +396,11 @@ func (rbe *RealisticBacktestEngine) Run(barsByDate map[time.Time]map[string][]fe
 		fmt.Printf("Warning: Failed to export CSV: %v\n", err)
 	}
 
+	// Export stats JSON
+	if err := rbe.exportStats(); err != nil {
+		fmt.Printf("Warning: Failed to export stats: %v\n", err)
+	}
+
 	return nil
 }
 
@@ -210,11 +410,17 @@ type TickerBar struct {
 	Bar    feed.Bar
 }
 
-// organizeByMinute organizes bars by minute timestamp
+// MinuteBars represents bars for a specific minute
+type MinuteBars struct {
+	MinuteTime time.Time
+	Bars       []TickerBar
+}
+
+// organizeByMinute organizes bars by minute timestamp and returns them sorted chronologically
 func (rbe *RealisticBacktestEngine) organizeByMinute(
 	dayBars map[string][]feed.Bar,
 	date time.Time,
-) map[time.Time][]TickerBar {
+) []MinuteBars {
 	minuteMap := make(map[time.Time][]TickerBar)
 
 	for ticker, bars := range dayBars {
@@ -228,7 +434,27 @@ func (rbe *RealisticBacktestEngine) organizeByMinute(
 		}
 	}
 
-	return minuteMap
+	// Convert map to sorted slice
+	result := make([]MinuteBars, 0, len(minuteMap))
+	for minuteTime, bars := range minuteMap {
+		// Sort bars within this minute chronologically
+		sortedBars := make([]TickerBar, len(bars))
+		copy(sortedBars, bars)
+		sort.Slice(sortedBars, func(i, j int) bool {
+			return sortedBars[i].Bar.Time.Before(sortedBars[j].Bar.Time)
+		})
+		result = append(result, MinuteBars{
+			MinuteTime: minuteTime,
+			Bars:       sortedBars,
+		})
+	}
+
+	// Sort by minute time
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].MinuteTime.Before(result[j].MinuteTime)
+	})
+
+	return result
 }
 
 // convertBar converts feed.Bar to strategy.Bar
@@ -245,6 +471,20 @@ func (rbe *RealisticBacktestEngine) convertBar(fb feed.Bar) strategy.Bar {
 
 // checkEntries checks for entry signals and executes trades
 func (rbe *RealisticBacktestEngine) checkEntries(currentTime time.Time, eodTime time.Time, minuteBars []TickerBar) {
+	// TIME FILTER: Focus on best performing hours based on backtest results
+	// Stats show: 11:00 AM = 60% win rate (BEST), 9:00 AM = 20%, 10:00 AM = 16.7%
+	// Strategy: Trade in 10:00-11:30 AM window to include best hour while allowing some flexibility
+	hour := currentTime.Hour()
+	minute := currentTime.Minute()
+
+	// Allow entries during 10:00 AM - 11:30 AM ET
+	// This includes the best performing hour (11:00 AM with 60% win rate)
+	// But excludes worst hours (9:00 AM = 20%, 10:00 AM = 16.7% early in hour)
+	if hour < 10 || (hour == 10 && minute < 30) || hour > 11 || (hour == 11 && minute > 30) {
+		// Outside best trading window - skip entry checks
+		return
+	}
+
 	// Collect entry signals from current minute bars
 	signals := make([]*strategy.EntrySignal, 0)
 
@@ -284,6 +524,26 @@ func (rbe *RealisticBacktestEngine) checkEntries(currentTime time.Time, eodTime 
 		// CheckBothDirections returns all valid signals (both short and long)
 		tickerSignals := rbe.strategyEngine.CheckBothDirections(ticker, strategyBar, eodTime, openPositions)
 
+		// Score signals with ML if available
+		if rbe.mlScorer != nil && rbe.mlScorer.IsEnabled() {
+			// Get recent bars for feature extraction from strategy engine
+			recentBars := rbe.strategyEngine.GetRecentBars(ticker, 10)
+
+			for _, signal := range tickerSignals {
+				// Score with ML
+				mlScore := rbe.mlScorer.ScoreSignal(signal, tickerState, recentBars)
+				signal.MLScore = mlScore
+			}
+		} else {
+			// ML not enabled - set MLScore to -1.0 to indicate it wasn't calculated
+			// This way we can distinguish between "ML predicted 0.0" vs "ML not enabled"
+			for _, signal := range tickerSignals {
+				if signal.MLScore == 0.0 {
+					signal.MLScore = -1.0 // Mark as "not calculated"
+				}
+			}
+		}
+
 		// Add all signals from this ticker to the signals list
 		signals = append(signals, tickerSignals...)
 	}
@@ -303,9 +563,61 @@ func (rbe *RealisticBacktestEngine) checkEntries(currentTime time.Time, eodTime 
 	}
 	bestSignals := rbe.scanner.SelectBestSignals(signals, maxSignals)
 
+	// Filter signals by minimum confidence threshold
+	// Adjust threshold based on whether ML is enabled:
+	// - Without ML: max score is 70, so use lower threshold (35)
+	// - With ML: max score is 100, so use configured threshold (60)
+	filteredSignals := make([]*strategy.EntrySignal, 0, len(bestSignals))
+	minConfidence := rbe.cfg.MinConfidenceThreshold
+
+	// Adjust threshold based on whether ML is enabled
+	// Without ML: max possible score is ~80 (10% ML + 25% pattern + 30% VWAP + 20% RSI + 10% volume + 5% bonus)
+	// With ML: max possible score is ~100 (10% ML + 25% pattern + 30% VWAP + 20% RSI + 10% volume + 5% bonus)
+	if rbe.mlScorer == nil || !rbe.mlScorer.IsEnabled() {
+		// Without ML, max score is ~80, so use 50 (62.5% of max) for good selectivity
+		// This takes top ~40% of signals to balance quality and quantity
+		minConfidence = 50.0
+		if rbe.cfg.MinConfidenceThreshold < 50.0 && rbe.cfg.MinConfidenceThreshold > 0 {
+			// If user set a lower threshold, respect it
+			minConfidence = rbe.cfg.MinConfidenceThreshold
+		}
+	} else {
+		// With ML enabled, use threshold 60 (60% of max 100) for moderate selectivity
+		// ML model is not reliable (0% win rate), so we don't want to be too strict
+		if minConfidence < 60.0 {
+			minConfidence = 60.0
+		}
+	}
+
+	for _, signal := range bestSignals {
+		// Calculate score for this signal
+		scored := rbe.scanner.ScoreSignals([]*strategy.EntrySignal{signal})
+		if len(scored) > 0 && scored[0].Score >= minConfidence {
+			filteredSignals = append(filteredSignals, signal)
+		}
+	}
+
+	// Apply correlation filter if enabled
+	if rbe.cfg.EnableCorrelationFilter {
+		openPositions := rbe.strategyEngine.GetPositions()
+		correlationFiltered := make([]*strategy.EntrySignal, 0, len(filteredSignals))
+		for _, signal := range filteredSignals {
+			// Convert positions to slice for correlation check
+			posSlice := make([]*strategy.Position, len(openPositions))
+			copy(posSlice, openPositions)
+
+			if rbe.scanner.CheckCorrelation(signal.Ticker, posSlice) {
+				correlationFiltered = append(correlationFiltered, signal)
+			} else {
+				fmt.Printf("  [CORRELATION FILTER] Signal %s rejected: correlation limit reached\n", signal.Ticker)
+			}
+		}
+		filteredSignals = correlationFiltered
+	}
+
 	// Execute entries (can take multiple signals per minute up to max positions)
 	// Each entry checks buying power individually, so we can attempt all signals
-	for _, signal := range bestSignals {
+	for _, signal := range filteredSignals {
 		// Check if we've reached max positions (buying power check happens in executeEntry)
 		if rbe.strategyEngine.GetPositionCount() >= maxPositions {
 			break // Max positions reached
@@ -367,15 +679,47 @@ func (rbe *RealisticBacktestEngine) executeEntry(signal *strategy.EntrySignal, e
 	if stableBalance < rbe.cfg.AccountSize*0.8 {
 		stableBalance = rbe.cfg.AccountSize * 0.8
 	}
-	riskAmount := stableBalance * rbe.riskPct // 0.35% of stable balance (e.g., $87.50 for $25k)
+	baseRiskAmount := stableBalance * rbe.riskPct // 0.35% of stable balance (e.g., $87.50 for $25k)
+
+	// Calculate the actual score for this signal to use for position sizing
+	// Signals have already been filtered by score (60+ for ML), so we know they're good
+	// But we need to get the actual score to use for position sizing
+	scored := rbe.scanner.ScoreSignals([]*strategy.EntrySignal{signal})
+	actualScore := 0.0
+	if len(scored) > 0 {
+		actualScore = scored[0].Score
+	}
+
+	// Normalize score to 0-1 for position sizing (score is 0-100)
+	normalizedScore := actualScore / 100.0
+
+	// Use normalized score for position sizing (this is what passed the filter)
+	// This is more accurate than using pattern confidence alone
+	confidenceMultiplier := normalizedScore
+
+	// If we have ML score, use the average of normalized score and ML score for conservative sizing
+	if signal.MLScore > 0 {
+		// Average the two for balanced position sizing
+		confidenceMultiplier = (normalizedScore + signal.MLScore) / 2.0
+	}
+
+	// No need for additional threshold check here - signals already passed the score filter (60+)
+	// But ensure we have a reasonable minimum for position sizing (0.5 = 50% of base risk)
+	if confidenceMultiplier < 0.5 {
+		fmt.Printf("  [REJECTED] Signal %s: confidence too low for position sizing (%.2f < 0.5)\n", signal.Ticker, confidenceMultiplier)
+		return
+	}
+
+	// Apply multiplier to risk amount
+	adjustedRiskAmount := baseRiskAmount * confidenceMultiplier
 
 	// Log account balance and risk amount for debugging
-	fmt.Printf("  [POSITION SIZING] Account: $%.2f, Stable: $%.2f, Risk Amount: $%.2f\n",
-		rbe.accountBalance, stableBalance, riskAmount)
+	fmt.Printf("  [POSITION SIZING] Account: $%.2f, Stable: $%.2f, Base Risk: $%.2f, Confidence: %.2f, Adjusted Risk: $%.2f\n",
+		rbe.accountBalance, stableBalance, baseRiskAmount, confidenceMultiplier, adjustedRiskAmount)
 
 	shares, err := risk.CalculatePositionSize(
-		riskAmount,
-		fillPrice, // Use fill price with slippage for position sizing
+		adjustedRiskAmount, // Use adjusted risk amount based on confidence
+		fillPrice,          // Use fill price with slippage for position sizing
 		signal.StopLoss,
 		2500, // Max shares
 	)
@@ -396,6 +740,10 @@ func (rbe *RealisticBacktestEngine) executeEntry(signal *strategy.EntrySignal, e
 
 	// Update signal with fill price for position opening
 	signal.EntryPrice = fillPrice
+
+	// Store signal for stats tracking
+	signalKey := fmt.Sprintf("%s_%s", signal.Ticker, signal.Timestamp.Format(time.RFC3339))
+	rbe.signalsByTrade[signalKey] = signal
 
 	// Open position
 	rbe.strategyEngine.OpenPosition(signal, shares)
@@ -561,8 +909,9 @@ func (rbe *RealisticBacktestEngine) checkPartialExits(position *strategy.Positio
 			signalPnLPerShare = currentBar.Close - position.EntryPrice
 		}
 
-		if signalPnLPerShare >= 0.08 { // $0.08/share (matched to entry checker - faster profits)
-			sharesToClose := position.RemainingShares / 2
+		if signalPnLPerShare >= 0.20 { // $0.20/share (matched to entry checker - Target 1)
+			// Take 60% at Target 1 (changed from 50%)
+			sharesToClose := int(float64(position.RemainingShares) * 0.6)
 			if sharesToClose > 0 {
 				rbe.executePartialExit(position, sharesToClose, currentBar.Close, strategy.ExitReasonTarget1, currentTime)
 				rbe.strategyEngine.MarkTarget1Filled(position.Ticker)
@@ -579,7 +928,7 @@ func (rbe *RealisticBacktestEngine) checkPartialExits(position *strategy.Positio
 			signalPnLPerShare = currentBar.Close - position.EntryPrice
 		}
 
-		if signalPnLPerShare >= 0.15 { // $0.15/share (matched to entry checker - faster exits)
+		if signalPnLPerShare >= 0.30 { // $0.30/share (matched to entry checker - Target 2)
 			rbe.executeExit(position, currentBar.Close, strategy.ExitReasonTarget2, currentTime)
 		}
 	}
@@ -793,6 +1142,18 @@ func (rbe *RealisticBacktestEngine) executeExit(position *strategy.Position, exi
 	}
 	rbe.trades = append(rbe.trades, trade)
 
+	// Record trade for adaptive threshold tracking
+	rbe.strategyEngine.RecordTrade(position.Ticker, position.EntryTime, netPnL)
+
+	// Record trade for stats (find matching signal)
+	signalKey := fmt.Sprintf("%s_%s", position.Ticker, position.EntryTime.Format(time.RFC3339))
+	if signal, exists := rbe.signalsByTrade[signalKey]; exists {
+		rbe.stats.RecordTrade(trade, signal)
+	} else {
+		// Record without signal info if not found
+		rbe.stats.RecordTrade(trade, nil)
+	}
+
 	// Close position
 	rbe.strategyEngine.ClosePosition(position.Ticker)
 
@@ -925,6 +1286,14 @@ func (rbe *RealisticBacktestEngine) executePartialExit(position *strategy.Positi
 	}
 	rbe.trades = append(rbe.trades, trade)
 
+	// Record partial trade for stats (find matching signal)
+	signalKey := fmt.Sprintf("%s_%s", position.Ticker, position.EntryTime.Format(time.RFC3339))
+	if signal, exists := rbe.signalsByTrade[signalKey]; exists {
+		rbe.stats.RecordTrade(trade, signal)
+	} else {
+		rbe.stats.RecordTrade(trade, nil)
+	}
+
 	// Update position
 	rbe.strategyEngine.ClosePartial(position.Ticker, shares)
 
@@ -1001,6 +1370,18 @@ func (rbe *RealisticBacktestEngine) printResults() {
 		winRate := float64(wins) / float64(len(rbe.trades)) * 100
 		fmt.Printf("Win Rate: %.2f%%\n", winRate)
 		fmt.Printf("Total Net P&L: $%.2f\n", totalPnL)
+		fmt.Printf("Average Win: $%.2f\n", rbe.stats.AverageWin)
+		fmt.Printf("Average Loss: $%.2f\n", rbe.stats.AverageLoss)
+	}
+
+	// Print summary stats
+	fmt.Println("\n=== STATISTICS SUMMARY ===")
+	fmt.Println("Win Rate by Hour:")
+	for hour := 9; hour <= 15; hour++ {
+		if stat, exists := rbe.stats.WinRateByHour[hour]; exists && stat.Total > 0 {
+			winRate := float64(stat.Wins) / float64(stat.Total) * 100
+			fmt.Printf("  %d:00 - %.1f%% (%d wins / %d total)\n", hour, winRate, stat.Wins, stat.Total)
+		}
 	}
 }
 
@@ -1076,5 +1457,100 @@ func (rbe *RealisticBacktestEngine) exportCSV() error {
 	}
 
 	fmt.Printf("\nResults exported to: %s\n", filepath)
+	return nil
+}
+
+// exportStats exports backtest statistics to JSON file
+func (rbe *RealisticBacktestEngine) exportStats() error {
+	// Create results directory if it doesn't exist
+	resultsDir := "cmd/backtest/results"
+	if err := os.MkdirAll(resultsDir, 0755); err != nil {
+		return fmt.Errorf("failed to create results directory: %v", err)
+	}
+
+	// Generate filename: backtest_YYYYMMDD_HHMMSS_runN_stats.json
+	now := time.Now()
+	totalPct := ((rbe.accountBalance - rbe.cfg.AccountSize) / rbe.cfg.AccountSize) * 100
+	filename := fmt.Sprintf("backtest_%s_run%d_%dd_%.1fpct_stats.json",
+		now.Format("20060102_150405"),
+		rbe.runNumber,
+		rbe.totalDays,
+		totalPct,
+	)
+	filepath := filepath.Join(resultsDir, filename)
+
+	// Convert stats to JSON-serializable format
+	statsJSON := map[string]interface{}{
+		"run_number":           rbe.runNumber,
+		"total_days":           rbe.totalDays,
+		"total_trades":         len(rbe.trades),
+		"final_balance":        rbe.accountBalance,
+		"total_pnl":            rbe.accountBalance - rbe.cfg.AccountSize,
+		"account_size":         rbe.cfg.AccountSize,
+		"win_rate_by_hour":     rbe.stats.WinRateByHour,
+		"win_rate_by_vwap":     rbe.stats.WinRateByVWAP,
+		"win_rate_by_rsi":      rbe.stats.WinRateByRSI,
+		"win_rate_by_pattern":  rbe.stats.WinRateByPattern,
+		"average_win":          rbe.stats.AverageWin,
+		"average_loss":         rbe.stats.AverageLoss,
+		"total_wins":           rbe.stats.TotalWins,
+		"total_losses":         rbe.stats.TotalLosses,
+		"win_rate_by_ml_score": rbe.stats.WinRateByMLScore,
+	}
+
+	// Calculate win rates
+	winRateByHour := make(map[int]float64)
+	for hour, stat := range rbe.stats.WinRateByHour {
+		if stat.Total > 0 {
+			winRateByHour[hour] = float64(stat.Wins) / float64(stat.Total) * 100
+		}
+	}
+	statsJSON["win_rate_by_hour_pct"] = winRateByHour
+
+	winRateByVWAP := make(map[string]float64)
+	for bucket, stat := range rbe.stats.WinRateByVWAP {
+		if stat.Total > 0 {
+			winRateByVWAP[bucket] = float64(stat.Wins) / float64(stat.Total) * 100
+		}
+	}
+	statsJSON["win_rate_by_vwap_pct"] = winRateByVWAP
+
+	winRateByRSI := make(map[string]float64)
+	for bucket, stat := range rbe.stats.WinRateByRSI {
+		if stat.Total > 0 {
+			winRateByRSI[bucket] = float64(stat.Wins) / float64(stat.Total) * 100
+		}
+	}
+	statsJSON["win_rate_by_rsi_pct"] = winRateByRSI
+
+	winRateByPattern := make(map[string]float64)
+	patternNames := map[strategy.DeathCandlePattern]string{
+		strategy.NoPattern:            "NoPattern",
+		strategy.BearishEngulfing:     "BearishEngulfing",
+		strategy.RejectionAtExtension: "RejectionAtExtension",
+		strategy.ShootingStar:         "ShootingStar",
+		strategy.BullishEngulfing:     "BullishEngulfing",
+		strategy.RejectionAtBottom:    "RejectionAtBottom",
+		strategy.Hammer:               "Hammer",
+	}
+	for pattern, stat := range rbe.stats.WinRateByPattern {
+		if stat.Total > 0 {
+			patternName := patternNames[pattern]
+			winRateByPattern[patternName] = float64(stat.Wins) / float64(stat.Total) * 100
+		}
+	}
+	statsJSON["win_rate_by_pattern_pct"] = winRateByPattern
+
+	// Write JSON file
+	data, err := json.MarshalIndent(statsJSON, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal stats: %v", err)
+	}
+
+	if err := os.WriteFile(filepath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write stats file: %v", err)
+	}
+
+	fmt.Printf("Stats exported to: %s\n", filepath)
 	return nil
 }

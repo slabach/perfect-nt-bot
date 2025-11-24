@@ -47,6 +47,11 @@ func NewStrategyEngine(location *time.Location, marketOpen time.Time) *StrategyE
 func (se *StrategyEngine) ResetDailyState(marketOpen time.Time) {
 	se.marketOpen = marketOpen
 	
+	// Reset performance tracker for adaptive thresholds
+	if se.entryChecker != nil {
+		se.entryChecker.ResetDaily()
+	}
+	
 	// Reset per-ticker indicators
 	for ticker := range se.tickerStates {
 		se.tickerStates[ticker] = &IndicatorState{}
@@ -61,6 +66,20 @@ func (se *StrategyEngine) ResetDailyState(marketOpen time.Time) {
 		if rsi, exists := se.tickerRSIs[ticker]; exists {
 			rsi.Reset()
 		}
+	}
+}
+
+// RecordTrade records a completed trade for performance tracking
+func (se *StrategyEngine) RecordTrade(ticker string, entryTime time.Time, netPnL float64) {
+	if se.entryChecker != nil {
+		se.entryChecker.RecordTrade(ticker, entryTime, netPnL)
+	}
+}
+
+// SetAdaptiveThresholdsEnabled enables or disables adaptive thresholds
+func (se *StrategyEngine) SetAdaptiveThresholdsEnabled(enabled bool) {
+	if se.entryChecker != nil {
+		se.entryChecker.SetAdaptiveEnabled(enabled)
 	}
 }
 
@@ -120,6 +139,17 @@ func (se *StrategyEngine) UpdateTicker(ticker string, bar Bar) {
 func (se *StrategyEngine) GetTickerState(ticker string) (*IndicatorState, bool) {
 	state, exists := se.tickerStates[ticker]
 	return state, exists
+}
+
+// GetRecentBars returns recent bars for a ticker (for ML feature extraction)
+func (se *StrategyEngine) GetRecentBars(ticker string, count int) []Bar {
+	if bars, exists := se.tickerBars[ticker]; exists {
+		if len(bars) > count {
+			return bars[len(bars)-count:]
+		}
+		return bars
+	}
+	return make([]Bar, 0)
 }
 
 // CheckEntry checks if entry conditions are met for a ticker (checks both short and long)

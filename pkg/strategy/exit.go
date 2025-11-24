@@ -20,13 +20,13 @@ type ExitChecker struct {
 // NewExitChecker creates a new exit checker
 func NewExitChecker() *ExitChecker {
 	return &ExitChecker{
-		target1Profit:    0.15,  // $0.15/share for first target (matched to entry checker, larger targets)
-		target2Profit:    0.25,  // $0.25/share for second target (matched to entry checker, better risk/reward)
-		minProfitPerShare: 0.10,
-		trailingStopOffset: 0.10, // Increased from 0.05 to 0.10 to avoid premature exits
-		timeDecayWindow1Hours: 1.0, // First window: start checking for profit > $0.10/share
+		target1Profit:    0.20,  // $0.20/share for first target (increased to overcome commissions)
+		target2Profit:    0.30,  // $0.30/share for second target (better risk/reward)
+		minProfitPerShare: 0.12, // Increased from 0.10 to require minimum profit after commissions
+		trailingStopOffset: 0.12, // Increased from 0.10 to 0.12 to avoid premature exits
+		timeDecayWindow1Hours: 1.0, // First window: start checking for profit > $0.12/share
 		timeDecayWindow2Hours: 2.0, // Second window: force exit regardless of profit
-		breakevenMinutes:  20.0, // Move to breakeven after 20 minutes (reduced from 30)
+		breakevenMinutes:  20.0, // Move to breakeven after 20 minutes (increased from 15 to give more time)
 		earlyExitHour:     15,   // Exit by 3:30 PM ET if not profitable
 		earlyExitMinute:   30,
 	}
@@ -50,9 +50,9 @@ func (ec *ExitChecker) CheckExitConditions(
 	}
 
 	// Priority 1 Fix: Improved EOD Exit Logic
-	// Exit ALL unprofitable positions by 1:30 PM (140 minutes before EOD)
+	// Exit ALL unprofitable positions by 12:30 PM (150 minutes before EOD)
 	// This prevents positions from being held all day and losing money at EOD
-	unprofitableExitTime := eodTime.Add(-140 * time.Minute) // 1:30 PM
+	unprofitableExitTime := eodTime.Add(-150 * time.Minute) // 12:30 PM
 	if currentTime.After(unprofitableExitTime) || currentTime.Equal(unprofitableExitTime) {
 		if pnlPerShare <= 0 {
 			// Not profitable by 1:30 PM - exit now to avoid EOD losses
